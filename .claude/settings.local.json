@@ -14,7 +14,25 @@
       "Bash(gh api:*)",
       "Bash(git init:*)",
       "Bash(git commit:*)",
-      "Bash(gh issue:*)"
+      "Bash(gh issue:*)",
+      "Read(//private/tmp/**)",
+      "Bash(rm -rf text-to-typo3-temp)",
+      "Bash(pnpm create:*)",
+      "Bash(rsync -a --exclude=.git --exclude=node_modules --exclude=.next /tmp/text-to-typo3-temp/ /Users/rupertgermann/AI/text-to-typo3/.claude/worktrees/agent-af936e2f/)",
+      "Bash(pnpm install:*)",
+      "Bash(pnpm add:*)",
+      "Bash(pnpm approve-builds:*)",
+      "Bash(pnpm rebuild:*)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); d.setdefault\\('pnpm',{}\\)['onlyBuiltDependencies']=['better-sqlite3','esbuild']; json.dump\\(d,sys.stdout,indent=2\\)\")",
+      "Bash(mv package.json.tmp package.json)",
+      "Bash(pnpm dlx:*)",
+      "Bash(pnpm build:*)",
+      "Bash(git merge:*)",
+      "Bash(git stash:*)",
+      "Bash(echo \"---EXISTS: $?\")",
+      "Bash(pnpm db:generate:*)",
+      "Bash(git worktree:*)",
+      "Bash(git branch:*)"
     ]
   }
 }
