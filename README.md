@@ -1,6 +1,6 @@
 # text-to-typo3
 
-`text-to-typo3` is a Next.js App Router application for chatting with a TYPO3 instance through its MCP server. Editors authenticate with TYPO3 OAuth, work inside conversation threads, inspect tool calls inline, and use either OpenAI or LM Studio-backed models from the same interface.
+`text-to-typo3` is a Next.js App Router application for chatting with a TYPO3 instance through its MCP server. Editors authenticate with TYPO3 OAuth or local MCP token mode, work inside conversation threads, inspect tool calls inline, and use either OpenAI or LM Studio-backed models from the same interface.
 
 ## What The App Does
 
@@ -9,6 +9,8 @@
 - Streams AI responses token-by-token with the Vercel AI SDK.
 - Persists conversations, messages, tool calls, and per-user model settings in SQLite.
 - Connects server-side to the TYPO3 MCP endpoint and forwards the authenticated TYPO3 bearer token on every MCP request.
+- Supports multi-step MCP tool execution so the assistant can inspect TYPO3 state, fetch schema details, and continue to follow-up tool calls inside the same response.
+- Guides TYPO3 write operations toward schema-aware retries when a `WriteTable` call returns validation or missing-input feedback.
 - Renders MCP tool calls inline in the chat and in a filterable Activity sidebar.
 - Supports message editing and rerunning from an earlier user prompt.
 - Supports image attachments through drag-and-drop or the file picker.
@@ -66,7 +68,7 @@ TYPO3_MCP_SYSTEM_PROMPT=Optional TYPO3-specific system prompt text
 - `TYPO3_MCP_URL` can point directly at the MCP endpoint, including the tokenized URL from the TYPO3 MCP Server backend screen.
 - `TYPO3_MCP_ACCESS_TOKEN` enables token-based local mode when the TYPO3 instance expects a bearer token instead of browser OAuth.
 - `TYPO3_LOCAL_USER_NAME` controls the synthetic local display name used in token-based mode.
-- `OPENAI_API_KEY` enables the default OpenAI model catalog and chat provider fallback.
+- `OPENAI_API_KEY` enables the default OpenAI model catalog and acts as the fallback server-side key when a user has not stored a personal OpenAI key in Settings.
 - `ENCRYPTION_KEY` is used for secrets stored in SQLite.
 - `SESSION_SECRET` secures the Iron Session cookie.
 - `NEXT_PUBLIC_APP_URL` should match the externally reachable app URL used in the TYPO3 OAuth callback.
@@ -134,7 +136,7 @@ pnpm dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
-Unauthenticated requests redirect to `/api/auth/login`, which starts the TYPO3 OAuth flow.
+In OAuth mode, unauthenticated requests redirect to `/api/auth/login`, which starts the TYPO3 OAuth flow. In token-based MCP mode, the app redirects directly into the chat UI without the browser OAuth round-trip.
 
 ### Production build
 
@@ -171,7 +173,7 @@ pnpm db:studio
 
 ### Authentication
 
-- Visiting the app without a valid session redirects to TYPO3 OAuth login.
+- Visiting the app without a valid session starts TYPO3 OAuth login in OAuth mode and opens the chat directly in token-based MCP mode.
 - The callback exchanges the authorization code, stores encrypted tokens in SQLite, and writes the Iron Session cookie.
 - Expired access tokens are refreshed transparently.
 - Logout revokes TYPO3 tokens when possible and clears the local session.
@@ -190,13 +192,17 @@ pnpm db:studio
 - User messages support copy, timestamp hover state, edit-and-rerun, and image attachments.
 - Stopping generation preserves the partial response.
 - Conversation history restores after reload.
+- TYPO3 MCP sessions can span several tool steps inside one response, up to five model/tool round-trips per request.
+- When TYPO3 write validation fails, the assistant is instructed to inspect schema details and retry with corrected `WriteTable` input before treating the task as blocked.
 
 ### Tool calls
 
 - MCP tools are fetched server-side and cached per session.
+- The app initializes and reuses TYPO3 MCP session IDs when the TYPO3 server supports MCP session headers.
 - Read and write tool calls are rendered as collapsible cards in the chat thread.
 - The Activity sidebar shows the same tool traffic in chronological order with read/write filters.
 - Write results can expose a direct TYPO3 backend record link when the MCP response includes record metadata.
+- The default TYPO3 MCP workflows supported by the upstream server include page navigation, table discovery, schema inspection, record reads, search, flexform schema inspection, and `WriteTable` record creation or updates.
 
 ### Model selection
 
@@ -204,6 +210,8 @@ pnpm db:studio
 - The settings modal includes OpenAI and LM Studio configuration.
 - Per-user settings are persisted in SQLite.
 - Context-window information is shown in the header picker and in settings tooltips.
+- The default selected model falls back to `gpt-5.4-mini` when no user preference is stored.
+- `gpt-5.4-nano` uses the provider's built-in MCP server tool integration; other OpenAI-compatible models use the app's TYPO3 MCP bridge.
 
 ## UI Overview
 
@@ -265,8 +273,10 @@ pnpm scaffold
 pnpm scaffold --dry-run
 pnpm scaffold --force
 pnpm scaffold --instance-dir typo3-instance
+pnpm scaffold -i typo3-instance
 pnpm scaffold --php-version 8.3
 pnpm scaffold --project-name my-typo3-demo
+pnpm scaffold --help
 ```
 
 ### Behavior
@@ -293,6 +303,14 @@ The CLI supports these automation hooks:
 - `TYPO3_SCAFFOLD_NEWS_COMMAND`
 - `TYPO3_SCAFFOLD_OAUTH_CLIENT_COMMAND`
 
+The scaffold flow also exports these hook context variables while those commands run:
+
+- `TYPO3_SCAFFOLD_PROJECT_NAME`
+- `TYPO3_SCAFFOLD_INSTANCE_DIR`
+- `TYPO3_SCAFFOLD_BACKEND_URL`
+- `TYPO3_SCAFFOLD_SITE_NAME`
+- `TYPO3_SCAFFOLD_WORKSPACE_NAME`
+
 Each hook is a shell command that runs inside the scaffold flow, which makes it possible to automate TYPO3-specific workspace creation, demo content seeding, news seeding, and OAuth client registration without hardcoding project-specific TYPO3 commands in the repository.
 
 ## LM Studio Configuration
@@ -307,6 +325,8 @@ Typical setup:
 4. Paste the base URL into the LM Studio section.
 5. Click `Fetch models`.
 6. Select a model in Settings or in the header picker.
+
+The model catalog endpoint accepts an LM Studio base URL override, which is how the Settings UI fetches available local models before saving a selection.
 
 ## OpenAI Configuration
 
@@ -333,6 +353,7 @@ Conversation export is available from the conversation header. The generated Mar
 - conversation metadata
 - the full ordered message transcript
 - serialized tool-call data for messages that include tool output
+- assistant messages that contain tool-only steps, even when the natural-language response is empty
 
 ## Manual Test Plan
 

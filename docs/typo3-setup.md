@@ -1,6 +1,6 @@
 # TYPO3 Setup
 
-This guide covers the TYPO3-side requirements for `text-to-typo3`, including the exact Composer packages to install, how each TYPO3 value maps into `.env.local`, and when to use OAuth mode versus token-based MCP mode.
+This guide covers the TYPO3-side requirements for `text-to-typo3`, including the exact Composer packages to install, how each TYPO3 value maps into `.env.local`, when to use OAuth mode versus token-based MCP mode, and what TYPO3 MCP capabilities the chat app expects.
 
 ## Required TYPO3 Packages
 
@@ -30,6 +30,29 @@ After installing the Composer package:
 4. Confirm that TYPO3 shows the MCP Server screen and a server URL.
 
 The public package documentation for `hn/typo3-mcp-server` describes this backend flow and says the MCP Server screen is available under `[Username] -> MCP Server`.
+
+## TYPO3 MCP Capabilities Used By The App
+
+The chat interface is designed around the upstream TYPO3 MCP server toolset described in the TYPO3 MCP server repository:
+
+- `GetPageTree`
+- `GetPage`
+- `ListTables`
+- `ReadTable`
+- `Search`
+- `GetTableSchema`
+- `GetFlexFormSchema`
+- `WriteTable`
+
+The app supports multi-step MCP runs, so a single user request can read page context, inspect table schema, and continue into follow-up TYPO3 tool calls before the response is finalized.
+
+For content creation and updates, TYPO3 users should have:
+
+- access to the relevant pages and tables
+- a writable workspace
+- permission to create and edit records in the target TYPO3 area
+
+The chat flow expects `WriteTable` create and update operations to accept a `data` object containing the field values to write. When TYPO3 returns validation feedback, the assistant can inspect schema details and retry with corrected input in the same response.
 
 ## `.env.local` Values And Where They Come From
 
@@ -63,6 +86,8 @@ In this mode, the required values are:
 - `TYPO3_OAUTH_CLIENT_SECRET`
 - `NEXT_PUBLIC_APP_URL`
 
+In OAuth mode, visiting the app without an active session starts the TYPO3 browser login flow automatically.
+
 ### Token-based MCP mode
 
 Use token-based MCP mode when the TYPO3 backend MCP Server screen shows a tokenized URL like:
@@ -86,6 +111,8 @@ TYPO3_LOCAL_USER_NAME=Local TYPO3 Token
 ```
 
 `TYPO3_MCP_ACCESS_TOKEN` is available for setups that use a raw bearer token instead of the full tokenized MCP URL.
+
+In token-based MCP mode, the app skips the browser OAuth redirect and opens directly into the chat interface.
 
 ### `TYPO3_BASE_URL`
 
@@ -258,6 +285,18 @@ OAuth mode also expects:
 If login fails, verify those routes first.
 
 If token-based mode is used, the MCP URL itself is the critical endpoint to verify.
+
+## TYPO3 Permission Checklist
+
+For end-to-end TYPO3 editing workflows, the backend user or token should be able to:
+
+- read the page tree and page records
+- read `tt_content` and any extension tables involved in the workflow
+- inspect table schemas through the MCP server
+- create or update records through `WriteTable`
+- work inside a writable TYPO3 workspace
+
+If read operations succeed but write operations fail, verify TYPO3 permissions and workspace access before debugging the chat client.
 
 ## Working Example
 

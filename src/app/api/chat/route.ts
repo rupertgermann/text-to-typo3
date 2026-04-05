@@ -1,6 +1,6 @@
 import { type NextRequest } from "next/server";
 import { eq, and, asc, inArray } from "drizzle-orm";
-import { streamText, convertToModelMessages, type UIMessage } from "ai";
+import { stepCountIs, streamText, convertToModelMessages, type UIMessage } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { db } from "@/lib/db";
 import { conversations, messages } from "@/lib/db/schema";
@@ -15,7 +15,16 @@ import {
   serializeMessageParts,
 } from "@/lib/chat-message-parts";
 
-const SYSTEM_PROMPT = `You are a helpful assistant for TYPO3 CMS. You help users manage their TYPO3 website by answering questions, providing guidance, and assisting with content management tasks. Be concise, accurate, and helpful. When discussing TYPO3-specific features, refer to the correct TYPO3 version terminology and best practices. Use TYPO3 MCP tools when you need live site data or need to modify TYPO3 content. Default writes to TYPO3 workspaces, and ask for confirmation before broad changes that affect many records.`;
+const SYSTEM_PROMPT = `You are a helpful assistant for TYPO3 CMS. You help users manage their TYPO3 website by answering questions, providing guidance, and assisting with content management tasks. Be concise, accurate, and helpful. When discussing TYPO3-specific features, refer to the correct TYPO3 version terminology and best practices. Use TYPO3 MCP tools when you need live site data or need to modify TYPO3 content. Default writes to TYPO3 workspaces, and ask for confirmation before broad changes that affect many records.
+
+When a user asks you to create or update TYPO3 content and an appropriate write tool is available, continue until the requested TYPO3 change is actually completed or you hit a real blocking error that cannot be resolved from the available tool outputs.
+
+For TYPO3 WriteTable operations:
+- For create and update actions, include a data object with the field values to write.
+- If you do not yet know the required fields, inspect the schema first and then retry the write with corrected parameters.
+- If a write fails with a validation or missing-input error, treat that as feedback for another attempt, not as a final blocker.
+- Do not claim that a tool cannot write field values unless the tool schema or the error explicitly proves that limitation.
+- After reading a page for context, continue with the needed read, schema, and write calls instead of stopping at analysis alone.`;
 
 function getConversationTitle(text: string): string {
   return text
@@ -204,6 +213,7 @@ export async function POST(request: NextRequest) {
     model: provider.responses(modelId),
     system: [SYSTEM_PROMPT, env.TYPO3_MCP_SYSTEM_PROMPT].filter(Boolean).join("\n\n"),
     messages: modelMessages,
+    stopWhen: stepCountIs(5),
     tools,
   });
 
