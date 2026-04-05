@@ -146,3 +146,10 @@ Expected result:
 - Help text shows command options and hook environment variables.
 - Dry run prints the planned scaffold flow without writing TYPO3 resources.
 - A real run writes `.env.local`, scaffold state, and the generated scaffold summary.
+
+
+## test prompts
+
+- What tools does the TYPO3 MCP server offer?
+- create a new sysfolder in "shared content". add some example news to this folder. then add a news plugin content element to the page named "content examples"
+- translate the news and the news folder to german
