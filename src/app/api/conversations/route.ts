@@ -1,19 +1,18 @@
 import { type NextRequest } from "next/server";
-import { eq, desc } from "drizzle-orm";
-import { db } from "@/lib/db";
-import { conversations } from "@/lib/db/schema";
 import { getAuthenticatedUser } from "@/lib/auth";
+import {
+  createConversationForUser,
+  listConversationsForUser,
+} from "@/lib/conversations";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   const auth = await getAuthenticatedUser();
   if (!auth) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const userConversations = await db.query.conversations.findMany({
-    where: eq(conversations.user_id, auth.user.id),
-    orderBy: [desc(conversations.updated_at)],
-  });
+  const query = request.nextUrl.searchParams.get("q") ?? undefined;
+  const userConversations = await listConversationsForUser(auth.user.id, query);
 
   return Response.json(userConversations);
 }
@@ -36,13 +35,7 @@ export async function POST(request: NextRequest) {
       ? body.title.trim()
       : "New Conversation";
 
-  const [conversation] = await db
-    .insert(conversations)
-    .values({
-      user_id: auth.user.id,
-      title,
-    })
-    .returning();
+  const conversation = await createConversationForUser(auth.user.id, title);
 
   return Response.json(conversation, { status: 201 });
 }

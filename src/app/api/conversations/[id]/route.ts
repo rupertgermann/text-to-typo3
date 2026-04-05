@@ -1,8 +1,10 @@
 import { type NextRequest } from "next/server";
-import { eq, and, asc } from "drizzle-orm";
-import { db } from "@/lib/db";
-import { conversations, messages } from "@/lib/db/schema";
 import { getAuthenticatedUser } from "@/lib/auth";
+import {
+  deleteConversationForUser,
+  getConversationWithMessagesForUser,
+  renameConversationForUser,
+} from "@/lib/conversations";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -17,23 +19,16 @@ export async function GET(
 
   const { id } = await params;
 
-  const conversation = await db.query.conversations.findFirst({
-    where: and(
-      eq(conversations.id, id),
-      eq(conversations.user_id, auth.user.id),
-    ),
-  });
+  const conversation = await getConversationWithMessagesForUser(
+    auth.user.id,
+    id,
+  );
 
   if (!conversation) {
     return Response.json({ error: "Conversation not found" }, { status: 404 });
   }
 
-  const conversationMessages = await db.query.messages.findMany({
-    where: eq(messages.conversation_id, id),
-    orderBy: [asc(messages.created_at)],
-  });
-
-  return Response.json({ ...conversation, messages: conversationMessages });
+  return Response.json(conversation);
 }
 
 export async function PATCH(
@@ -47,17 +42,6 @@ export async function PATCH(
 
   const { id } = await params;
 
-  const conversation = await db.query.conversations.findFirst({
-    where: and(
-      eq(conversations.id, id),
-      eq(conversations.user_id, auth.user.id),
-    ),
-  });
-
-  if (!conversation) {
-    return Response.json({ error: "Conversation not found" }, { status: 404 });
-  }
-
   let body: { title?: unknown };
   try {
     body = await request.json();
@@ -69,14 +53,15 @@ export async function PATCH(
     return Response.json({ error: "title is required" }, { status: 400 });
   }
 
-  const [updated] = await db
-    .update(conversations)
-    .set({
-      title: body.title.trim(),
-      updated_at: Math.floor(Date.now() / 1000),
-    })
-    .where(eq(conversations.id, id))
-    .returning();
+  const updated = await renameConversationForUser(
+    auth.user.id,
+    id,
+    body.title.trim(),
+  );
+
+  if (!updated) {
+    return Response.json({ error: "Conversation not found" }, { status: 404 });
+  }
 
   return Response.json(updated);
 }
@@ -92,19 +77,10 @@ export async function DELETE(
 
   const { id } = await params;
 
-  const conversation = await db.query.conversations.findFirst({
-    where: and(
-      eq(conversations.id, id),
-      eq(conversations.user_id, auth.user.id),
-    ),
-  });
-
-  if (!conversation) {
+  const deleted = await deleteConversationForUser(auth.user.id, id);
+  if (!deleted) {
     return Response.json({ error: "Conversation not found" }, { status: 404 });
   }
-
-  // Messages are cascade-deleted by the FK constraint
-  await db.delete(conversations).where(eq(conversations.id, id));
 
   return new Response(null, { status: 204 });
 }
