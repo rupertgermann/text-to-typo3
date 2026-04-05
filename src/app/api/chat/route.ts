@@ -169,7 +169,7 @@ export async function POST(request: NextRequest) {
     baseURL: useLmStudio ? userSettings.lmstudioBaseUrl || undefined : undefined,
   });
   const tools = await getMcpTools({
-    sessionId: auth.session.sessionId!,
+    sessionId: auth.session.sessionId || `token:${auth.user.id}`,
     accessToken: auth.accessToken,
   });
 

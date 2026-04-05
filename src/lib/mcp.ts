@@ -99,11 +99,12 @@ async function callMcpMethod<T>({
   params?: Record<string, unknown>;
 }): Promise<T> {
   const env = getEnv();
-  const response = await fetch(`${env.TYPO3_BASE_URL}/mcp`, {
+  const mcpUrl = env.TYPO3_MCP_URL || `${env.TYPO3_BASE_URL}/mcp`;
+  const response = await fetch(mcpUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`,
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     },
     body: JSON.stringify({
       jsonrpc: "2.0",

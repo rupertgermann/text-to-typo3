@@ -2,11 +2,20 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getIronSession } from "iron-session";
 import type { SessionData } from "@/lib/session";
+import { getEnv } from "@/lib/env";
 
 const PUBLIC_PATHS = ["/api/auth"];
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  const env = getEnv();
+
+  if (
+    env.TYPO3_MCP_ACCESS_TOKEN ||
+    (env.TYPO3_MCP_URL && env.TYPO3_MCP_URL.includes("token="))
+  ) {
+    return NextResponse.next();
+  }
 
   // Allow public paths
   if (PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {

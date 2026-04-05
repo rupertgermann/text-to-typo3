@@ -6,6 +6,50 @@ import { getEnv } from "@/lib/env";
 import { getSession, type SessionData } from "@/lib/session";
 import type { IronSession } from "iron-session";
 
+const LOCAL_TOKEN_USER_ID = "local-token-user";
+
+function isTokenAuthMode() {
+  const env = getEnv();
+  return Boolean(
+    env.TYPO3_MCP_ACCESS_TOKEN ||
+      (env.TYPO3_MCP_URL && env.TYPO3_MCP_URL.includes("token=")),
+  );
+}
+
+async function ensureLocalTokenUser(): Promise<User> {
+  const env = getEnv();
+  const existingUser = await db.query.users.findFirst({
+    where: eq(users.id, LOCAL_TOKEN_USER_ID),
+  });
+
+  if (existingUser) {
+    if (existingUser.display_name !== env.TYPO3_LOCAL_USER_NAME) {
+      await db
+        .update(users)
+        .set({ display_name: env.TYPO3_LOCAL_USER_NAME })
+        .where(eq(users.id, LOCAL_TOKEN_USER_ID));
+
+      return {
+        ...existingUser,
+        display_name: env.TYPO3_LOCAL_USER_NAME,
+      };
+    }
+
+    return existingUser;
+  }
+
+  const [createdUser] = await db
+    .insert(users)
+    .values({
+      id: LOCAL_TOKEN_USER_ID,
+      typo3_uid: LOCAL_TOKEN_USER_ID,
+      display_name: env.TYPO3_LOCAL_USER_NAME,
+    })
+    .returning();
+
+  return createdUser!;
+}
+
 /**
  * Retrieves a valid access token for the given session, refreshing it
  * automatically if the current token has expired or is about to expire.
@@ -79,6 +123,17 @@ export interface AuthenticatedUserContext {
  */
 export async function getAuthenticatedUser():
   Promise<AuthenticatedUserContext | null> {
+  if (isTokenAuthMode()) {
+    const env = getEnv();
+    const user = await ensureLocalTokenUser();
+
+    return {
+      accessToken: env.TYPO3_MCP_ACCESS_TOKEN,
+      session: await getSession(),
+      user,
+    };
+  }
+
   const session = await getSession();
 
   if (!session.userId || !session.sessionId) {
@@ -114,6 +169,10 @@ export async function getAuthenticatedUser():
 }
 
 async function revokeToken(token: string): Promise<void> {
+  if (isTokenAuthMode()) {
+    return;
+  }
+
   const env = getEnv();
 
   await fetch(`${env.TYPO3_BASE_URL}/oauth/revoke`, {
@@ -132,6 +191,10 @@ async function revokeToken(token: string): Promise<void> {
  * block local session cleanup.
  */
 export async function revokeSessionTokens(sessionId: string): Promise<void> {
+  if (isTokenAuthMode()) {
+    return;
+  }
+
   const session = await db.query.sessions.findFirst({
     where: eq(sessions.id, sessionId),
   });

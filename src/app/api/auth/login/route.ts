@@ -6,6 +6,13 @@ import { getEnv } from "@/lib/env";
 export async function GET() {
   const env = getEnv();
 
+  if (
+    env.TYPO3_MCP_ACCESS_TOKEN ||
+    (env.TYPO3_MCP_URL && env.TYPO3_MCP_URL.includes("token="))
+  ) {
+    return NextResponse.redirect(new URL("/", env.APP_URL));
+  }
+
   // Generate PKCE code verifier (43-128 chars, URL-safe)
   const codeVerifier = randomBytes(32).toString("base64url");
 
