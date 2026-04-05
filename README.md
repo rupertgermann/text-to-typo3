@@ -1,6 +1,8 @@
 # text-to-typo3
 
-`text-to-typo3` is a Next.js App Router application for chatting with a TYPO3 instance through its MCP server. Editors authenticate with TYPO3 OAuth or local MCP token mode, work inside conversation threads, inspect tool calls inline, and use either OpenAI or LM Studio-backed models from the same interface.
+### Prompt your TYPO3 Website's content into existence with AI
+
+`text-to-typo3` is a Next.js App Router application for chatting with a TYPO3 instance through its MCP server (https://github.com/hauptsacheNet/typo3-mcp-server). Editors authenticate with TYPO3 OAuth or local MCP token mode, work inside conversation threads, inspect tool calls inline, and use either OpenAI or LM Studio-backed models from the same interface.
 
 ## What The App Does
 
@@ -18,6 +20,12 @@
 - Supports conversation search, inline rename, delete, and Markdown export.
 - Supports model selection from OpenAI and LM Studio, including context-window hints in the UI.
 - Includes a scaffold CLI for provisioning a local TYPO3 + DDEV environment and writing matching app configuration.
+
+## Screenshots
+
+| Chat Interface | Settings Modal |
+|:--:|:--:|
+| ![Chat Interface](./docs/screens/chat.png) | ![Settings Modal](./docs/screens/settings.png) |
 
 ## Tech Stack
 
