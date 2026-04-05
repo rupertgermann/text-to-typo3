@@ -47,3 +47,5 @@ data/*.db-shm
 *.tsbuildinfo
 next-env.d.ts
 .claude/skills/
+.agents/skills/
+.claude/settings.local.json

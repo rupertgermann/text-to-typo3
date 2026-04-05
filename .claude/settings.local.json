@@ -32,7 +32,14 @@
       "Bash(echo \"---EXISTS: $?\")",
       "Bash(pnpm db:generate:*)",
       "Bash(git worktree:*)",
-      "Bash(git branch:*)"
+      "Bash(git branch:*)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('version:', d.get\\('version'\\)\\); exports = d.get\\('exports', {}\\); [print\\(k\\) for k in exports.keys\\(\\) if 'react' in k.lower\\(\\)]\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); exports = d.get\\('exports', {}\\); [print\\(k, '->', v if isinstance\\(v, str\\) else list\\(v.keys\\(\\)\\)[:3]\\) for k in exports.keys\\(\\)]\")",
+      "Bash(python3 -c \" import json with open\\('/Users/rupertgermann/AI/text-to-typo3/node_modules/ai/package.json'\\) as f: d = json.load\\(f\\) exports = d.get\\('exports', {}\\) for k, v in exports.items\\(\\): print\\(k\\) \")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('version:', d.get\\('version'\\)\\)\")",
+      "Bash(git -C /Users/rupertgermann/AI/text-to-typo3 log --oneline -5)",
+      "Bash(npx next:*)",
+      "Bash(git rm:*)"
     ]
   }
 }
