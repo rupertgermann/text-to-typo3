@@ -1,5 +1,3 @@
-import { getResolvedUserSettings } from "@/lib/user-settings";
-
 type OpenAIModelsResponse = {
   data?: Array<{ id?: string }>;
 };
@@ -36,8 +34,9 @@ function normalizeModelId(id: string): string {
   return id.trim();
 }
 
-function isChatModelId(id: string): boolean {
-  return /^(gpt-|o1|o3|o4|chat-)/.test(id) || id.includes("mini");
+function isAllowedOpenAIModelId(id: string): boolean {
+  const normalized = id.trim().toLowerCase();
+  return /^gpt-5\.4(?:-(?:mini|nano|nao))?$/.test(normalized);
 }
 
 function estimateContextWindow(id: string): number | null {
@@ -101,7 +100,7 @@ export async function listOpenAIModels(
     return rawModels
       .map((entry) => entry.id?.trim())
       .filter((id): id is string => typeof id === "string" && id.length > 0)
-      .filter((id) => isChatModelId(id))
+      .filter((id) => isAllowedOpenAIModelId(id))
       .map((id) => ({
         id: normalizeModelId(id),
         name: buildDisplayName(id),
@@ -150,31 +149,6 @@ export async function listLmStudioModels(
   } catch {
     return [];
   }
-}
-
-export async function listAvailableModelsForUser(
-  userId: string,
-  options?: {
-    lmstudioBaseUrlOverride?: string | null;
-  },
-): Promise<UserModelCatalog> {
-  const settings = await getResolvedUserSettings(userId);
-  const lmstudioBaseUrl =
-    options?.lmstudioBaseUrlOverride ?? settings.lmstudioBaseUrl;
-
-  const openAIModels = settings.openAiApiKey
-    ? await listOpenAIModels(settings.openAiApiKey)
-    : [];
-  const lmStudioModels = lmstudioBaseUrl
-    ? await listLmStudioModels(lmstudioBaseUrl)
-    : [];
-
-  return {
-    models: [...openAIModels, ...lmStudioModels],
-    selectedModelId: settings.modelId,
-    lmstudioBaseUrl,
-    hasOpenAIKey: Boolean(settings.openAiApiKey),
-  };
 }
 
 export function getModelContextWindowLabel(

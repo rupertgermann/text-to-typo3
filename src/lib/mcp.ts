@@ -1,3 +1,5 @@
+import http from "node:http";
+import https from "node:https";
 import { jsonSchema, tool, type ToolSet } from "ai";
 import { getEnv } from "@/lib/env";
 
@@ -37,8 +39,31 @@ type CachedToolSet = {
   tools: ToolSet;
 };
 
+type McpMethodResponse<T> = {
+  result: T;
+  sessionHeaderId: string | null;
+};
+
 const TOOL_CACHE_TTL_MS = 5 * 60 * 1000;
 const toolCache = new Map<string, CachedToolSet>();
+const mcpSessionCache = new Map<string, string>();
+
+export function getTypo3McpUrl(): string {
+  const env = getEnv();
+  const baseUrl = env.TYPO3_MCP_URL || `${env.TYPO3_BASE_URL}/mcp`;
+
+  if (!env.TYPO3_MCP_ACCESS_TOKEN) {
+    return baseUrl;
+  }
+
+  const url = new URL(baseUrl);
+
+  if (!url.searchParams.has("token")) {
+    url.searchParams.set("token", env.TYPO3_MCP_ACCESS_TOKEN);
+  }
+
+  return url.toString();
+}
 
 function buildBackendRecordUrl(output: unknown): string | null {
   if (!output || typeof output !== "object") {
@@ -89,47 +114,134 @@ function classifyTool(name: string): "read" | "write" | "unknown" {
   return "unknown";
 }
 
+function shouldAllowInsecureTls(url: URL): boolean {
+  const hostname = url.hostname.toLowerCase();
+
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname.endsWith(".ddev.site") ||
+    hostname.endsWith(".test")
+  );
+}
+
+async function postJson(
+  url: string,
+  headers: Record<string, string>,
+  body: string,
+): Promise<{
+  status: number;
+  headers: Headers;
+  body: string;
+}> {
+  const parsedUrl = new URL(url);
+  const allowInsecureTls = parsedUrl.protocol === "https:" && shouldAllowInsecureTls(parsedUrl);
+
+  if (!allowInsecureTls) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body,
+    });
+
+    return {
+      status: response.status,
+      headers: response.headers,
+      body: await response.text(),
+    };
+  }
+
+  const transport = parsedUrl.protocol === "https:" ? https : http;
+
+  return new Promise((resolve, reject) => {
+    const request = transport.request(
+      parsedUrl,
+      {
+        method: "POST",
+        headers,
+        ...(parsedUrl.protocol === "https:"
+          ? { rejectUnauthorized: false }
+          : {}),
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+
+        response.on("data", (chunk) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
+
+        response.on("end", () => {
+          const normalizedHeaders: [string, string][] =
+            Object.entries(response.headers).flatMap(([key, value]) => {
+              if (Array.isArray(value)) {
+                return value.map((entry) => [key, entry] as [string, string]);
+              }
+
+              return value ? [[key, value] as [string, string]] : [];
+            });
+
+          resolve({
+            status: response.statusCode ?? 500,
+            headers: new Headers(normalizedHeaders),
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+      },
+    );
+
+    request.on("error", reject);
+    request.write(body);
+    request.end();
+  });
+}
+
 async function callMcpMethod<T>({
   accessToken,
   method,
   params,
+  sessionHeaderId,
 }: {
   accessToken: string;
   method: string;
   params?: Record<string, unknown>;
-}): Promise<T> {
-  const env = getEnv();
-  const mcpUrl = env.TYPO3_MCP_URL || `${env.TYPO3_BASE_URL}/mcp`;
-  const response = await fetch(mcpUrl, {
-    method: "POST",
-    headers: {
+  sessionHeaderId?: string | null;
+}): Promise<McpMethodResponse<T>> {
+  const mcpUrl = getTypo3McpUrl();
+  const response = await postJson(
+    mcpUrl,
+    {
       "Content-Type": "application/json",
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      ...(sessionHeaderId ? { "Mcp-Session-Id": sessionHeaderId } : {}),
     },
-    body: JSON.stringify({
+    JSON.stringify({
       jsonrpc: "2.0",
       id: crypto.randomUUID(),
       method,
       params,
     }),
-  });
+  );
 
-  if (!response.ok) {
+  if (response.status < 200 || response.status >= 300) {
     throw new Error(`MCP request failed with status ${response.status}`);
   }
 
-  const payload = (await response.json()) as JsonRpcSuccess<T> | JsonRpcError;
+  const payload = JSON.parse(response.body) as JsonRpcSuccess<T> | JsonRpcError;
 
   if ("error" in payload) {
     throw new Error(payload.error.message);
   }
 
-  return payload.result;
+  return {
+    result: payload.result,
+    sessionHeaderId: response.headers.get("mcp-session-id"),
+  };
 }
 
-async function initializeMcp(accessToken: string): Promise<void> {
+async function initializeMcp(accessToken: string): Promise<string | null> {
   try {
-    await callMcpMethod({
+    const response = await callMcpMethod({
       accessToken,
       method: "initialize",
       params: {
@@ -141,8 +253,10 @@ async function initializeMcp(accessToken: string): Promise<void> {
         },
       },
     });
+    return response.sessionHeaderId;
   } catch {
     // Some servers accept direct tools/list calls without initialize.
+    return null;
   }
 }
 
@@ -160,15 +274,28 @@ export async function getMcpTools({
     return cached.tools;
   }
 
-  await initializeMcp(accessToken);
+  let mcpSessionId = mcpSessionCache.get(sessionId) ?? null;
 
-  const list = await callMcpMethod<McpToolListResult>({
+  if (!mcpSessionId) {
+    mcpSessionId = await initializeMcp(accessToken);
+    if (mcpSessionId) {
+      mcpSessionCache.set(sessionId, mcpSessionId);
+    }
+  }
+
+  const listResponse = await callMcpMethod<McpToolListResult>({
     accessToken,
     method: "tools/list",
+    sessionHeaderId: mcpSessionId,
   });
+  const activeMcpSessionId = listResponse.sessionHeaderId ?? mcpSessionId;
+
+  if (activeMcpSessionId) {
+    mcpSessionCache.set(sessionId, activeMcpSessionId);
+  }
 
   const tools = Object.fromEntries(
-    list.tools.map((mcpTool) => [
+    listResponse.result.tools.map((mcpTool) => [
       mcpTool.name,
       tool({
         description: mcpTool.description || `TYPO3 MCP tool: ${mcpTool.name}`,
@@ -186,14 +313,15 @@ export async function getMcpTools({
               name: mcpTool.name,
               arguments: input,
             },
+            sessionHeaderId: mcpSessionCache.get(sessionId) ?? activeMcpSessionId,
           });
 
           const operation = classifyTool(mcpTool.name);
           const backendRecordUrl =
-            operation === "write" ? buildBackendRecordUrl(result) : null;
+            operation === "write" ? buildBackendRecordUrl(result.result) : null;
 
           return {
-            ...result,
+            ...result.result,
             _meta: {
               operation,
               backendRecordUrl,

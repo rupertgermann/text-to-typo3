@@ -5,6 +5,7 @@ import { ChevronDown, Loader2 } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
@@ -166,7 +167,9 @@ export function ModelPickerDropdown({
       />
 
       <DropdownMenuContent className="w-[min(28rem,calc(100vw-1rem))]">
-        <DropdownMenuLabel>Choose a model</DropdownMenuLabel>
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>Choose a model</DropdownMenuLabel>
+        </DropdownMenuGroup>
 
         {error ? (
           <div className="px-2 py-2 text-sm text-destructive">{error}</div>

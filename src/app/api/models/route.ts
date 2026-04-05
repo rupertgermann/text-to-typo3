@@ -1,6 +1,6 @@
 import { type NextRequest } from "next/server";
 import { getAuthenticatedUser } from "@/lib/auth";
-import { listAvailableModelsForUser } from "@/lib/models";
+import { listAvailableModelsForUser } from "@/lib/model-service";
 
 export async function GET(request: NextRequest) {
   const auth = await getAuthenticatedUser();

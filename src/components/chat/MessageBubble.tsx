@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { isFileUIPart, isToolUIPart, type UIMessage } from "ai";
 import { Check, Copy, Pencil } from "lucide-react";
@@ -23,6 +23,7 @@ export function MessageBubble({
 }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
+  const [formattedCreatedAt, setFormattedCreatedAt] = useState<string | null>(null);
   const textContent = extractMessageText(message.parts);
   const createdAt =
     typeof message.metadata === "object" &&
@@ -31,6 +32,15 @@ export function MessageBubble({
     typeof message.metadata.createdAt === "number"
       ? new Date(message.metadata.createdAt * 1000)
       : null;
+
+  useEffect(() => {
+    if (!createdAt) {
+      setFormattedCreatedAt(null);
+      return;
+    }
+
+    setFormattedCreatedAt(createdAt.toLocaleString());
+  }, [createdAt]);
 
   async function handleCopy() {
     try {
@@ -59,7 +69,9 @@ export function MessageBubble({
       >
         <div className="flex items-center justify-between gap-3 opacity-0 transition-opacity group-hover:opacity-100">
           <div className="text-[11px] text-muted-foreground">
-            {createdAt ? createdAt.toLocaleString() : ""}
+            <time dateTime={createdAt?.toISOString()} suppressHydrationWarning>
+              {formattedCreatedAt ?? (createdAt ? createdAt.toISOString() : "")}
+            </time>
           </div>
           <div className="flex items-center gap-1">
             {isUser && onEdit ? (

@@ -6,7 +6,7 @@ import { db } from "@/lib/db";
 import { conversations, messages } from "@/lib/db/schema";
 import { getAuthenticatedUser } from "@/lib/auth";
 import { getEnv } from "@/lib/env";
-import { getMcpTools } from "@/lib/mcp";
+import { getMcpTools, getTypo3McpUrl } from "@/lib/mcp";
 import { getResolvedUserSettings } from "@/lib/user-settings";
 import {
   deserializeMessageParts,
@@ -23,6 +23,10 @@ function getConversationTitle(text: string): string {
     .split(/\s+/)
     .slice(0, 6)
     .join(" ");
+}
+
+function supportsBuiltInMcpTool(modelId: string): boolean {
+  return modelId.trim().toLowerCase() === "gpt-5.4-nano";
 }
 
 export async function POST(request: NextRequest) {
@@ -161,20 +165,43 @@ export async function POST(request: NextRequest) {
     Boolean(userSettings.lmstudioBaseUrl) &&
     Boolean(userSettings.modelId) &&
     userSettings.modelId === userSettings.lmstudioModelId;
+  const modelId = userSettings.modelId || "gpt-5.4-mini";
+  const openAiApiKey =
+    userSettings.openAiApiKey || env.OPENAI_API_KEY || process.env.OPENAI_API_KEY;
+
+  if (!useLmStudio && !openAiApiKey) {
+    return Response.json(
+      { error: "Missing OpenAI API key. Add one in settings or .env.local." },
+      { status: 400 },
+    );
+  }
 
   const provider = createOpenAI({
-    apiKey: useLmStudio
-      ? "lm-studio"
-      : userSettings.openAiApiKey || env.OPENAI_API_KEY || process.env.OPENAI_API_KEY,
+    apiKey: useLmStudio ? "lm-studio" : openAiApiKey,
     baseURL: useLmStudio ? userSettings.lmstudioBaseUrl || undefined : undefined,
   });
-  const tools = await getMcpTools({
-    sessionId: auth.session.sessionId || `token:${auth.user.id}`,
-    accessToken: auth.accessToken,
-  });
+
+  const tools = useLmStudio
+    ? undefined
+    : supportsBuiltInMcpTool(modelId)
+      ? {
+          typo3: provider.tools.mcp({
+            serverLabel: "typo3",
+            serverUrl: getTypo3McpUrl(),
+            serverDescription:
+              "TYPO3 MCP server for reading and updating TYPO3 content and configuration.",
+            headers: auth.accessToken
+              ? { Authorization: `Bearer ${auth.accessToken}` }
+              : undefined,
+          }),
+        }
+      : await getMcpTools({
+          sessionId: auth.session.sessionId || `token:${auth.user.id}`,
+          accessToken: auth.accessToken,
+        });
 
   const result = streamText({
-    model: provider(userSettings.modelId || "gpt-4o-mini"),
+    model: provider.responses(modelId),
     system: [SYSTEM_PROMPT, env.TYPO3_MCP_SYSTEM_PROMPT].filter(Boolean).join("\n\n"),
     messages: modelMessages,
     tools,
@@ -182,6 +209,8 @@ export async function POST(request: NextRequest) {
 
   return result.toUIMessageStreamResponse({
     originalMessages,
+    onError: (error) =>
+      error instanceof Error ? error.message : "Chat request failed",
     onFinish: async ({ responseMessage }) => {
       const assistantText = extractMessageText(responseMessage.parts);
 
