@@ -2,18 +2,35 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport, type UIMessage } from "ai";
+import { DefaultChatTransport, type FileUIPart, type UIMessage } from "ai";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { MessageBubble } from "./MessageBubble";
 import type { Message } from "@/lib/db/schema";
 import { ActivitySidebar } from "./ActivitySidebar";
-import { PanelRight, Send, Square, Loader2 } from "lucide-react";
+import {
+  ImagePlus,
+  Loader2,
+  Paperclip,
+  PanelRight,
+  Pencil,
+  Send,
+  Square,
+  X,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import {
+  deserializeMessageParts,
+  extractMessageText,
+} from "@/lib/chat-message-parts";
 
 interface ChatInterfaceProps {
   conversationId: string;
   initialMessages: Message[];
 }
+
+type PendingAttachment = {
+  file: File;
+};
 
 /** Convert DB messages to UIMessage format. Only user/assistant/system roles are included. */
 function toUIMessages(dbMessages: Message[]): UIMessage[] {
@@ -26,18 +43,33 @@ function toUIMessages(dbMessages: Message[]): UIMessage[] {
       metadata: {
         createdAt: m.created_at,
       },
-      parts: (() => {
-        if (m.tool_calls) {
-          try {
-            return JSON.parse(m.tool_calls) as UIMessage["parts"];
-          } catch {
-            // Fall through to plain text reconstruction.
-          }
-        }
-
-        return [{ type: "text" as const, text: m.content }];
-      })(),
+      parts:
+        deserializeMessageParts(m.tool_calls) ??
+        [{ type: "text" as const, text: m.content }],
     }));
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith("image/");
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error("Failed to read file"));
+    };
+    reader.onerror = () => reject(new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function createPendingAttachments(files: File[]): PendingAttachment[] {
+  return files.map((file) => ({ file }));
 }
 
 export function ChatInterface({
@@ -45,7 +77,12 @@ export function ChatInterface({
   initialMessages,
 }: ChatInterfaceProps) {
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [showActivity, setShowActivity] = useState(false);
+  const [composerError, setComposerError] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const { messages, status, error, sendMessage, stop } = useChat({
     messages: toUIMessages(initialMessages),
@@ -61,18 +98,116 @@ export function ChatInterface({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const addFiles = (files: File[]) => {
+    const imageFiles = files.filter(isImageFile);
+    if (imageFiles.length === 0) {
+      return;
+    }
+
+    setAttachments((current) => [...current, ...createPendingAttachments(imageFiles)]);
+    setComposerError(null);
+  };
+
+  const handleSubmit = async () => {
     const text = input.trim();
-    if (!text || isLoading) return;
-    setInput("");
-    await sendMessage({ text });
+    if (!text && attachments.length === 0) return;
+
+    const currentAttachments = attachments;
+    const currentText = input;
+    const currentEditingMessageId = editingMessageId;
+
+    try {
+      const files: FileUIPart[] = await Promise.all(
+        currentAttachments.map(async (attachment) => ({
+          type: "file" as const,
+          mediaType: attachment.file.type || "application/octet-stream",
+          filename: attachment.file.name,
+          url: await fileToDataUrl(attachment.file),
+        })),
+      );
+
+      setInput("");
+      setAttachments([]);
+      setEditingMessageId(null);
+      setComposerError(null);
+
+      if (currentEditingMessageId) {
+        if (currentText.trim() && files.length > 0) {
+          await sendMessage({
+            text: currentText.trim(),
+            files,
+            messageId: currentEditingMessageId,
+          });
+        } else if (currentText.trim()) {
+          await sendMessage({
+            text: currentText.trim(),
+            messageId: currentEditingMessageId,
+          });
+        } else {
+          await sendMessage({
+            files,
+            messageId: currentEditingMessageId,
+          });
+        }
+        return;
+      }
+
+      if (currentText.trim()) {
+        await sendMessage({
+          text: currentText.trim(),
+          ...(files.length > 0 ? { files } : {}),
+        });
+        return;
+      }
+
+      await sendMessage({ files });
+    } catch (sendError) {
+      setComposerError(
+        sendError instanceof Error ? sendError.message : "Failed to send message",
+      );
+    }
+  };
+
+  const startEditing = (message: UIMessage) => {
+    setEditingMessageId(message.id);
+    setInput(extractMessageText(message.parts));
+    setAttachments([]);
+    setComposerError(null);
+    queueMicrotask(() => textareaRef.current?.focus());
+  };
+
+  const removeAttachment = (index: number) => {
+    setAttachments((current) => {
+      const next = current.filter((_, currentIndex) => currentIndex !== index);
+      return next;
+    });
+  };
+
+  const handleFileSelection = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.currentTarget.files ?? []);
+    addFiles(files);
+    event.currentTarget.value = "";
+  };
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    if (isLoading) {
+      return;
+    }
+
+    const files = Array.from(event.dataTransfer.files ?? []);
+    addFiles(files);
+  };
+
+  const handleSubmitEvent = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (isLoading) return;
+    await handleSubmit();
   };
 
   return (
     <div className="flex flex-1 overflow-hidden">
       <div className="flex flex-1 flex-col overflow-hidden">
-      {/* Messages area */}
         <div className="flex items-center justify-end border-b px-4 py-2">
           <Button
             type="button"
@@ -87,32 +222,41 @@ export function ChatInterface({
 
         <div className="flex-1 overflow-y-auto px-4 py-4">
           <div className="mx-auto max-w-3xl space-y-4">
-          {messages.length === 0 ? (
-            <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-muted-foreground">
-              <p className="text-base">What would you like to know about your TYPO3 instance?</p>
-              <p className="mt-1 text-sm">Ask anything — pages, content, settings, or configuration.</p>
-            </div>
-          ) : (
-            messages.map((message) => (
-              <MessageBubble key={message.id} message={message} />
-            ))
-          )}
-
-          {/* Thinking indicator */}
-          {status === "submitted" && (
-            <div className="flex justify-start">
-              <div className="flex items-center gap-2 rounded-2xl rounded-bl-sm bg-muted px-4 py-2.5 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                <span>Thinking…</span>
+            {messages.length === 0 ? (
+              <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-muted-foreground">
+                <p className="text-base">
+                  What would you like to know about your TYPO3 instance?
+                </p>
+                <p className="mt-1 text-sm">
+                  Ask anything - pages, content, settings, or configuration.
+                </p>
               </div>
-            </div>
-          )}
+            ) : (
+              messages.map((message) => (
+                <MessageBubble
+                  key={message.id}
+                  message={message}
+                  allowEdit={!isLoading}
+                  onEdit={
+                    message.role === "user" ? () => startEditing(message) : undefined
+                  }
+                />
+              ))
+            )}
+
+            {status === "submitted" && (
+              <div className="flex justify-start">
+                <div className="flex items-center gap-2 rounded-2xl rounded-bl-sm bg-muted px-4 py-2.5 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Thinking...</span>
+                </div>
+              </div>
+            )}
 
             <div ref={messagesEndRef} />
           </div>
         </div>
 
-      {/* Error display */}
         {error && (
           <div className="mx-auto w-full max-w-3xl px-4 py-2">
             <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive">
@@ -121,52 +265,145 @@ export function ChatInterface({
           </div>
         )}
 
-      {/* Input area */}
         <div className="border-t bg-background px-4 py-3">
-          <form
-            onSubmit={handleSubmit}
-            className="mx-auto flex max-w-3xl items-end gap-2"
-          >
-            <Input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Message your TYPO3 assistant…"
-              disabled={isLoading}
-              className="h-10 flex-1 resize-none rounded-xl text-sm"
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSubmit(e as unknown as React.FormEvent);
-                }
-              }}
-            />
+          <form onSubmit={handleSubmitEvent} className="mx-auto max-w-3xl">
+            <div
+              className={cn(
+                "rounded-2xl border bg-background p-3 shadow-sm",
+                composerError ? "border-destructive/50" : "border-border",
+              )}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={handleDrop}
+            >
+              {editingMessageId ? (
+                <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-dashed bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                  <div className="flex items-center gap-2">
+                    <Pencil className="h-3.5 w-3.5" />
+                    <span>Editing a previous message</span>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setEditingMessageId(null);
+                      setInput("");
+                      setAttachments([]);
+                      setComposerError(null);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              ) : null}
 
-            {isLoading ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                onClick={() => {
-                  void stop();
+              {attachments.length > 0 ? (
+                <div className="mb-3 flex flex-wrap gap-2">
+                  {attachments.map((attachment, index) => (
+                    <div
+                      key={`${attachment.file.name}-${attachment.file.lastModified}-${index}`}
+                      className="flex items-center gap-2 rounded-xl border bg-muted/40 px-3 py-2 text-xs"
+                    >
+                      <ImagePlus className="h-4 w-4" />
+                      <span className="max-w-48 truncate">{attachment.file.name}</span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        onClick={() => removeAttachment(index)}
+                        title="Remove attachment"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(event) => {
+                  setInput(event.target.value);
+                  setComposerError(null);
                 }}
-                title="Stop generating"
-                className="h-10 w-10 shrink-0 rounded-xl"
-              >
-                <Square className="h-4 w-4" />
-                <span className="sr-only">Stop</span>
-              </Button>
-            ) : (
-              <Button
-                type="submit"
-                size="icon"
-                disabled={!input.trim()}
-                title="Send message"
-                className="h-10 w-10 shrink-0 rounded-xl"
-              >
-                <Send className="h-4 w-4" />
-                <span className="sr-only">Send</span>
-              </Button>
-            )}
+                placeholder={
+                  editingMessageId
+                    ? "Edit your previous message..."
+                    : "Message your TYPO3 assistant..."
+                }
+                disabled={isLoading}
+                rows={2}
+                className="min-h-20 w-full resize-none rounded-xl border border-input bg-transparent px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void handleSubmit();
+                  }
+                }}
+              />
+
+              <div className="mt-3 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    onChange={handleFileSelection}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isLoading}
+                    title="Attach images"
+                  >
+                    <Paperclip className="h-4 w-4" />
+                    Attach
+                  </Button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {isLoading ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      onClick={() => {
+                        void stop();
+                      }}
+                      title="Stop generating"
+                      className="h-10 w-10 shrink-0 rounded-xl"
+                    >
+                      <Square className="h-4 w-4" />
+                      <span className="sr-only">Stop</span>
+                    </Button>
+                  ) : (
+                    <Button
+                      type="submit"
+                      size="icon"
+                      disabled={!input.trim() && attachments.length === 0}
+                      title={
+                        editingMessageId ? "Update message" : "Send message"
+                      }
+                      className="h-10 w-10 shrink-0 rounded-xl"
+                    >
+                      <Send className="h-4 w-4" />
+                      <span className="sr-only">Send</span>
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {composerError ? (
+                <div className="mt-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  {composerError}
+                </div>
+              ) : null}
+            </div>
           </form>
         </div>
       </div>

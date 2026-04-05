@@ -2,24 +2,28 @@
 
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { isToolUIPart, type UIMessage } from "ai";
-import { Check, Copy } from "lucide-react";
+import { isFileUIPart, isToolUIPart, type UIMessage } from "ai";
+import { Check, Copy, Pencil } from "lucide-react";
 import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ToolCallCard, type GenericToolPart } from "./ToolCallCard";
+import { extractMessageText } from "@/lib/chat-message-parts";
 
 interface MessageBubbleProps {
   message: UIMessage;
+  allowEdit?: boolean;
+  onEdit?: () => void;
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+export function MessageBubble({
+  message,
+  allowEdit = true,
+  onEdit,
+}: MessageBubbleProps) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
-  const textContent = message.parts
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .join("\n");
+  const textContent = extractMessageText(message.parts);
   const createdAt =
     typeof message.metadata === "object" &&
     message.metadata &&
@@ -49,17 +53,41 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         className={cn(
           "max-w-[85%] space-y-3 rounded-2xl px-4 py-2.5 text-sm",
           isUser
-            ? "bg-primary text-primary-foreground rounded-br-sm"
-            : "bg-muted text-foreground rounded-bl-sm",
+            ? "rounded-br-sm bg-primary text-primary-foreground"
+            : "rounded-bl-sm bg-muted text-foreground",
         )}
       >
         <div className="flex items-center justify-between gap-3 opacity-0 transition-opacity group-hover:opacity-100">
           <div className="text-[11px] text-muted-foreground">
             {createdAt ? createdAt.toLocaleString() : ""}
           </div>
-          <Button type="button" variant="ghost" size="icon-xs" onClick={() => void handleCopy()}>
-            {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-          </Button>
+          <div className="flex items-center gap-1">
+            {isUser && onEdit ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                onClick={onEdit}
+                disabled={!allowEdit}
+                title="Edit message"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              onClick={() => void handleCopy()}
+              title="Copy message"
+            >
+              {copied ? (
+                <Check className="h-3.5 w-3.5" />
+              ) : (
+                <Copy className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          </div>
         </div>
 
         {message.parts.map((part, index) => {
@@ -108,6 +136,32 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                 >
                   {part.text}
                 </ReactMarkdown>
+              </div>
+            );
+          }
+
+          if (isFileUIPart(part)) {
+            const isImage = part.mediaType.startsWith("image/");
+
+            return (
+              <div key={index} className="space-y-2">
+                {isImage ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={part.url}
+                    alt={part.filename ?? "Attachment"}
+                    className="max-h-80 w-full rounded-xl border border-border/60 object-contain"
+                  />
+                ) : (
+                  <div className="rounded-xl border border-border/60 bg-background/60 px-3 py-2 text-xs">
+                    {part.filename ?? "Attachment"}
+                  </div>
+                )}
+                {part.filename ? (
+                  <div className="text-[11px] text-muted-foreground">
+                    {part.filename}
+                  </div>
+                ) : null}
               </div>
             );
           }
