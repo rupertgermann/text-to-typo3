@@ -2,6 +2,8 @@
   "name": "text-to-typo3",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "description": "Chat with a TYPO3 instance through its MCP server using OpenAI or LM Studio models.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

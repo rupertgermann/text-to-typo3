@@ -4,6 +4,8 @@
 
 `text-to-typo3` is a Next.js App Router application for chatting with a TYPO3 instance through its MCP server (https://github.com/hauptsacheNet/typo3-mcp-server). Editors authenticate with TYPO3 OAuth or local MCP token mode, work inside conversation threads, inspect tool calls inline, and use either OpenAI or LM Studio-backed models from the same interface.
 
+The project is released under the MIT license.
+
 ## What The App Does
 
 - Authenticates against TYPO3 with OAuth 2.0 Authorization Code + PKCE.
@@ -54,7 +56,7 @@
 
 ## Environment Variables
 
-Create `.env.local` in the project root.
+Copy `.env.example` to `.env.local` in the project root and fill in your own values.
 
 ```bash
 TYPO3_BASE_URL=https://your-typo3.example
@@ -63,9 +65,9 @@ TYPO3_MCP_ACCESS_TOKEN=
 TYPO3_LOCAL_USER_NAME=Local TYPO3 Token
 TYPO3_OAUTH_CLIENT_ID=your-client-id
 TYPO3_OAUTH_CLIENT_SECRET=your-client-secret
-OPENAI_API_KEY=sk-...
-ENCRYPTION_KEY=change-me
-SESSION_SECRET=change-me
+OPENAI_API_KEY=your-openai-api-key
+ENCRYPTION_KEY=generate-a-64-char-hex-key
+SESSION_SECRET=generate-a-long-random-secret
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 TYPO3_MCP_SYSTEM_PROMPT=Optional TYPO3-specific system prompt text
 ```
@@ -82,6 +84,7 @@ TYPO3_MCP_SYSTEM_PROMPT=Optional TYPO3-specific system prompt text
 - `SESSION_SECRET` secures the Iron Session cookie.
 - `NEXT_PUBLIC_APP_URL` should match the externally reachable app URL used in the TYPO3 OAuth callback.
 - `TYPO3_MCP_SYSTEM_PROMPT` is appended to the chat system prompt for instance-specific guidance.
+- Never commit `.env.local`, scaffold output, or generated TYPO3 credentials.
 
 Detailed TYPO3 setup, Composer packages, and OAuth value mapping are documented in [docs/typo3-setup.md](./docs/typo3-setup.md).
 
@@ -89,6 +92,12 @@ Detailed TYPO3 setup, Composer packages, and OAuth value mapping are documented 
 
 ```bash
 pnpm install
+```
+
+Create your local environment file:
+
+```bash
+cp .env.example .env.local
 ```
 
 ## TYPO3 Instance Setup
@@ -371,6 +380,16 @@ Conversation export is available from the conversation header. The generated Mar
 ## Manual Test Plan
 
 A short manual test plan lives in [docs/testing.md](./docs/testing.md).
+
+## Security Notes
+
+- Secrets belong in `.env.local` or your deployment platform's secret storage, not in Git.
+- `pnpm scaffold` generates local credentials and a scaffold summary; both stay ignored by default.
+- In production, `SESSION_SECRET` must be set explicitly.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).
 
 ## Project Structure
 

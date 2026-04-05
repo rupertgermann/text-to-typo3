@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getIronSession } from "iron-session";
-import type { SessionData } from "@/lib/session";
+import { getSessionPassword, type SessionData } from "@/lib/session";
 import { getEnv } from "@/lib/env";
 
 const PUBLIC_PATHS = ["/api/auth"];
@@ -30,9 +30,7 @@ export async function proxy(request: NextRequest) {
   // Check session
   const response = NextResponse.next();
   const session = await getIronSession<SessionData>(request, response, {
-    password:
-      process.env.SESSION_SECRET ||
-      "complex_password_at_least_32_characters_long_for_dev",
+    password: getSessionPassword(),
     cookieName: "text-to-typo3-session",
   });
 

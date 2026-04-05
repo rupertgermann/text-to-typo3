@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { isFileUIPart, isToolUIPart, type UIMessage } from "ai";
 import { Check, Copy, Pencil } from "lucide-react";
@@ -23,7 +23,6 @@ export function MessageBubble({
 }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
-  const [formattedCreatedAt, setFormattedCreatedAt] = useState<string | null>(null);
   const textContent = extractMessageText(message.parts);
   const createdAt =
     typeof message.metadata === "object" &&
@@ -32,15 +31,7 @@ export function MessageBubble({
     typeof message.metadata.createdAt === "number"
       ? new Date(message.metadata.createdAt * 1000)
       : null;
-
-  useEffect(() => {
-    if (!createdAt) {
-      setFormattedCreatedAt(null);
-      return;
-    }
-
-    setFormattedCreatedAt(createdAt.toLocaleString());
-  }, [createdAt]);
+  const formattedCreatedAt = createdAt ? createdAt.toLocaleString() : null;
 
   async function handleCopy() {
     try {

@@ -7,10 +7,21 @@ export interface SessionData {
   sessionId?: string;
 }
 
+function getSessionPassword(): string {
+  const password = process.env.SESSION_SECRET?.trim();
+  if (password) {
+    return password;
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("SESSION_SECRET must be set in production");
+  }
+
+  return "complex_password_at_least_32_characters_long_for_dev";
+}
+
 const sessionOptions = {
-  password:
-    process.env.SESSION_SECRET ||
-    "complex_password_at_least_32_characters_long_for_dev",
+  password: getSessionPassword(),
   cookieName: "text-to-typo3-session",
   cookieOptions: {
     secure: process.env.NODE_ENV === "production",
@@ -23,3 +34,5 @@ export async function getSession(): Promise<IronSession<SessionData>> {
   const cookieStore = await cookies();
   return getIronSession<SessionData>(cookieStore, sessionOptions);
 }
+
+export { getSessionPassword };

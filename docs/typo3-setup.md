@@ -312,9 +312,9 @@ TYPO3_LOCAL_USER_NAME=Local TYPO3 Token
 TYPO3_OAUTH_CLIENT_ID=text-to-typo3-web
 TYPO3_OAUTH_CLIENT_SECRET=replace-with-your-secret
 NEXT_PUBLIC_APP_URL=http://localhost:3000
-OPENAI_API_KEY=sk-...
-ENCRYPTION_KEY=replace-with-a-long-random-string
-SESSION_SECRET=replace-with-a-long-random-string
+OPENAI_API_KEY=your-openai-api-key
+ENCRYPTION_KEY=generate-a-64-char-hex-key
+SESSION_SECRET=generate-a-long-random-secret
 ```
 
 ### Working Example For Token-Based MCP Mode
@@ -324,9 +324,9 @@ TYPO3_BASE_URL=https://typo3-v13.ddev.site
 TYPO3_MCP_URL=https://typo3-v13.ddev.site/mcp?token=replace-with-token-from-typo3
 TYPO3_LOCAL_USER_NAME=Local TYPO3 Token
 NEXT_PUBLIC_APP_URL=http://localhost:3002
-OPENAI_API_KEY=sk-...
-ENCRYPTION_KEY=replace-with-a-long-random-string
-SESSION_SECRET=replace-with-a-long-random-string
+OPENAI_API_KEY=your-openai-api-key
+ENCRYPTION_KEY=generate-a-64-char-hex-key
+SESSION_SECRET=generate-a-long-random-secret
 ```
 
 ## Notes About The TYPO3 OAuth Values
