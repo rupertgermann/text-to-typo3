@@ -26,8 +26,28 @@ export default function RootLayout({
   return (
     <html
       lang="en"
+      suppressHydrationWarning
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              (function() {
+                try {
+                  var key = 'text-to-typo3-theme';
+                  var stored = localStorage.getItem(key);
+                  var theme = stored === 'light' || stored === 'dark'
+                    ? stored
+                    : (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+                  document.documentElement.classList.toggle('dark', theme === 'dark');
+                  document.documentElement.style.colorScheme = theme;
+                } catch (error) {}
+              })();
+            `,
+          }}
+        />
+      </head>
       <body className="min-h-full flex flex-col">
         <TooltipProvider>{children}</TooltipProvider>
       </body>

@@ -69,11 +69,11 @@ function ConversationPanel({
   setEditingTitle: (value: string) => void;
 }) {
   return (
-    <div className="flex h-full min-h-0 flex-col border-r bg-background/95">
-      <div className="border-b px-4 py-4">
+    <div className="flex h-full min-h-0 flex-col border-r border-border/70 bg-sidebar/90 backdrop-blur">
+      <div className="border-b border-border/70 px-4 py-5">
         <div className="flex items-center justify-between gap-2">
           <div>
-            <p className="text-sm font-medium">Conversations</p>
+            <p className="text-sm font-semibold tracking-wide">Conversations</p>
             <p className="text-xs text-muted-foreground">
               Search, rename, and manage your chats
             </p>
@@ -89,7 +89,7 @@ function ConversationPanel({
           </Button>
         </div>
 
-        <div className="mt-3 flex items-center gap-2 rounded-xl border bg-background px-3">
+        <div className="mt-4 flex items-center gap-2 rounded-2xl border border-border/70 bg-card/80 px-3 shadow-sm">
           <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
           <Input
             value={query}
@@ -101,7 +101,7 @@ function ConversationPanel({
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
-        <div className="space-y-1 p-2">
+        <div className="space-y-2 p-3">
           {isLoading ? (
             <div className="rounded-xl border border-dashed px-3 py-4 text-sm text-muted-foreground">
               Loading conversations...
@@ -121,8 +121,8 @@ function ConversationPanel({
                   className={cn(
                     "group flex items-start gap-2 rounded-xl border px-3 py-2 transition-colors",
                     isActive
-                      ? "border-primary bg-primary/5"
-                      : "border-transparent hover:border-border hover:bg-muted/70",
+                      ? "border-primary/40 bg-primary/8 shadow-sm"
+                      : "border-transparent hover:border-border/80 hover:bg-card/80",
                   )}
                 >
                   <button

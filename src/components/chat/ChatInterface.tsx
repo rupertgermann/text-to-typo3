@@ -208,11 +208,12 @@ export function ChatInterface({
   return (
     <div className="flex flex-1 overflow-hidden">
       <div className="flex flex-1 flex-col overflow-hidden">
-        <div className="flex items-center justify-end border-b px-4 py-2">
+        <div className="flex items-center justify-end border-b border-border/70 bg-background/60 px-4 py-3 backdrop-blur">
           <Button
             type="button"
             size="sm"
             variant="outline"
+            className="bg-card/80"
             onClick={() => setShowActivity((open) => !open)}
           >
             <PanelRight className="mr-2 h-4 w-4" />
@@ -220,14 +221,14 @@ export function ChatInterface({
           </Button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-4 py-4">
-          <div className="mx-auto max-w-3xl space-y-4">
+        <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8">
+          <div className="mx-auto max-w-4xl space-y-5">
             {messages.length === 0 ? (
-              <div className="flex h-full min-h-[300px] flex-col items-center justify-center text-muted-foreground">
-                <p className="text-base">
+              <div className="flex min-h-[420px] flex-col items-center justify-center rounded-[2rem] border border-dashed border-border/70 bg-card/50 px-8 text-center text-muted-foreground shadow-sm">
+                <p className="text-lg font-medium text-foreground">
                   What would you like to know about your TYPO3 instance?
                 </p>
-                <p className="mt-1 text-sm">
+                <p className="mt-2 max-w-xl text-sm leading-6">
                   Ask anything - pages, content, settings, or configuration.
                 </p>
               </div>
@@ -246,7 +247,7 @@ export function ChatInterface({
 
             {status === "submitted" && (
               <div className="flex justify-start">
-                <div className="flex items-center gap-2 rounded-2xl rounded-bl-sm bg-muted px-4 py-2.5 text-sm text-muted-foreground">
+                <div className="flex items-center gap-2 rounded-2xl rounded-bl-sm border border-border/70 bg-card/80 px-4 py-2.5 text-sm text-muted-foreground shadow-sm">
                   <Loader2 className="h-4 w-4 animate-spin" />
                   <span>Thinking...</span>
                 </div>
@@ -265,11 +266,11 @@ export function ChatInterface({
           </div>
         )}
 
-        <div className="border-t bg-background px-4 py-3">
+        <div className="border-t border-border/70 bg-background/80 px-4 py-4 backdrop-blur">
           <form onSubmit={handleSubmitEvent} className="mx-auto max-w-3xl">
             <div
               className={cn(
-                "rounded-2xl border bg-background p-3 shadow-sm",
+                "rounded-[1.75rem] border bg-card/90 p-3 shadow-lg shadow-black/5",
                 composerError ? "border-destructive/50" : "border-border",
               )}
               onDragOver={(event) => event.preventDefault()}

@@ -9,6 +9,7 @@ import { ChatInterface } from "@/components/chat/ChatInterface";
 import { ConversationSidebar } from "@/components/conversations/conversation-sidebar";
 import { SettingsModal } from "@/components/settings/settings-modal";
 import { ModelPickerDropdown } from "@/components/settings/model-picker-dropdown";
+import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { getEnv } from "@/lib/env";
 
 interface ConversationPageProps {
@@ -51,27 +52,27 @@ export default async function ConversationPage({
   const env = getEnv();
 
   return (
-    <div className="flex h-full min-h-0">
+    <div className="flex h-full min-h-0 bg-transparent">
       <ConversationSidebar activeConversationId={id} />
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Header */}
-        <header className="flex items-center justify-between border-b px-4 py-3">
+        <header className="flex items-center justify-between border-b border-border/70 bg-background/75 px-5 py-4 backdrop-blur">
           <div className="min-w-0">
-            <h1 className="truncate text-lg font-semibold">
+            <h1 className="truncate text-xl font-semibold tracking-tight">
               {conversation.title}
             </h1>
             <p className="text-sm text-muted-foreground">Conversation workspace</p>
           </div>
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 md:gap-3">
+            <div className="hidden items-center gap-2 rounded-full border border-border/70 bg-card/80 px-2.5 py-1.5 md:flex">
               <Avatar className="h-8 w-8">
                 <AvatarFallback className="text-xs">{initials}</AvatarFallback>
               </Avatar>
-              <span className="hidden text-sm text-muted-foreground md:inline">
+              <span className="text-sm text-muted-foreground">
                 {user.display_name}
               </span>
             </div>
+            <ThemeToggle />
             <ModelPickerDropdown className="hidden md:inline-flex" />
             <SettingsModal
               displayName={user.display_name}

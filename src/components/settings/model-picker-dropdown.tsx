@@ -134,20 +134,20 @@ export function ModelPickerDropdown({
             variant="outline"
             size="sm"
             className={cn(
-              "min-w-0 max-w-72 justify-between gap-2",
+              "min-w-0 max-w-72 justify-between gap-2 rounded-full bg-card/80 px-3",
               className,
             )}
           >
-            <span className="flex min-w-0 flex-1 flex-col items-start text-left leading-tight">
-              <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+            <span className="flex min-w-0 flex-1 items-center gap-2 text-left">
+              <span className="shrink-0 text-[11px] uppercase tracking-wide text-muted-foreground">
                 Model
               </span>
-              <span className="truncate text-sm font-medium">
+              <span className="truncate text-sm font-semibold">
                 {selectedModel?.name ?? (loading ? "Loading models..." : "Select model")}
               </span>
             </span>
 
-            <span className="flex items-center gap-2">
+            <span className="flex shrink-0 items-center gap-2">
               {selectedModel ? (
                 <>
                   <Badge variant="secondary" className="hidden sm:inline-flex">

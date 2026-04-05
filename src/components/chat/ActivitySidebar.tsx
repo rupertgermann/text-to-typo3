@@ -31,15 +31,15 @@ export function ActivitySidebar({ messages }: { messages: UIMessage[] }) {
   );
 
   return (
-    <aside className="flex h-full w-full max-w-sm flex-col border-l bg-muted/20">
-      <div className="flex items-center justify-between border-b px-4 py-3">
+    <aside className="flex h-full w-full max-w-sm flex-col border-l border-border/70 bg-card/70 backdrop-blur">
+      <div className="flex items-center justify-between border-b border-border/70 px-4 py-4">
         <div>
           <div className="text-sm font-semibold">Activity</div>
           <div className="text-xs text-muted-foreground">MCP tool calls in this conversation</div>
         </div>
       </div>
 
-      <div className="flex gap-2 border-b px-4 py-3">
+      <div className="flex gap-2 border-b border-border/70 px-4 py-3">
         <Button size="sm" variant={filter === "all" ? "default" : "outline"} onClick={() => setFilter("all")}>
           All
         </Button>
