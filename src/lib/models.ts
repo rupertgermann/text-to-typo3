@@ -186,3 +186,21 @@ export function getModelContextWindowLabel(
 
   return `Context window ${contextWindow.toLocaleString()} tokens`;
 }
+
+export function getModelContextWindowShortLabel(
+  contextWindow: number | null,
+): string {
+  if (!contextWindow) {
+    return "Context unknown";
+  }
+
+  if (contextWindow >= 1_000_000) {
+    return `${Math.round(contextWindow / 1_000_000)}M ctx`;
+  }
+
+  if (contextWindow >= 1_000) {
+    return `${Math.round(contextWindow / 1_000)}k ctx`;
+  }
+
+  return `${contextWindow} ctx`;
+}

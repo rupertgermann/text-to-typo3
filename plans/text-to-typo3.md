@@ -19,7 +19,7 @@ This plan now reflects the current codebase, not just the intended roadmap. Stat
 - Phase 3: `Partial`
 - Phase 4: `Implemented`
 - Phase 5: `Partial`
-- Phase 6: `Partial`
+- Phase 6: `Implemented`
 - Phase 7: `Partial`
 - Phase 8: `Partial`
 
@@ -161,7 +161,7 @@ Add a model picker dropdown in the chat header. It lists available OpenAI models
 - [x] Entering a LM Studio base URL in settings and clicking "Fetch models" populates the picker with LM Studio models
 - [~] Selecting a LM Studio model is wired through `/api/chat`, but local-model behavior still needs end-to-end verification against a running LM Studio instance
 - [x] Entering a personal OpenAI key in settings overrides the server key for that user's requests
-- [~] Context-window information is shown in model cards/title text, but not yet as a richer dedicated tooltip UI
+- [x] Context-window information is shown in dedicated tooltip UI in both the header picker and settings model cards
 
 ---
 
@@ -169,7 +169,7 @@ Add a model picker dropdown in the chat header. It lists available OpenAI models
 
 **User stories**: 11, 12, 13, 14, 18, 19, 22
 
-**Status**: `Partial`
+**Status**: `Implemented`
 
 ### What to build
 
@@ -177,10 +177,10 @@ Complete the chat interface with all remaining UX features. Add an edit button o
 
 ### Acceptance criteria
 
-- [ ] Clicking Edit on a user message makes it editable; submitting re-runs from that point and removes subsequent messages
+- [x] Clicking Edit on a user message makes it editable; submitting re-runs from that point and removes subsequent messages
 - [x] Every message has a Copy button that copies the raw text to clipboard
 - [x] Message timestamps are visible on hover
-- [ ] Dragging an image file onto the chat input attaches it; the AI can describe or reference it
+- [x] Dragging an image file onto the chat input attaches it; the AI can describe or reference it
 - [x] The activity sidebar toggles open/closed via a button in the header
 - [x] The activity sidebar shows all MCP tool calls for the current conversation in chronological order
 - [x] Filtering the sidebar by "Writes only" shows only write-classified tool calls

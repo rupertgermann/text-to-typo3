@@ -12,8 +12,14 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { AvailableModel, UserModelCatalog } from "@/lib/models";
+import {
+  getModelContextWindowLabel,
+  getModelContextWindowShortLabel,
+  type AvailableModel,
+  type UserModelCatalog,
+} from "@/lib/models";
 import type { PublicUserSettings } from "@/lib/user-settings";
 
 interface SettingsModalProps {
@@ -22,6 +28,7 @@ interface SettingsModalProps {
 }
 
 type RemoteModelCatalog = UserModelCatalog;
+const SETTINGS_UPDATED_EVENT = "text-to-typo3-settings-updated";
 
 function ModelCard({
   model,
@@ -50,6 +57,20 @@ function ModelCard({
           <Badge variant={model.provider === "openai" ? "default" : "secondary"}>
             {model.provider}
           </Badge>
+          {model.contextWindow ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <span className="inline-flex items-center rounded-full border border-border/70 bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {getModelContextWindowShortLabel(model.contextWindow)}
+                  </span>
+                }
+              />
+              <TooltipContent>
+                {getModelContextWindowLabel(model.contextWindow)}
+              </TooltipContent>
+            </Tooltip>
+          ) : null}
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
           {model.contextWindow
@@ -189,6 +210,7 @@ export function SettingsModal({
       const nextSettings: PublicUserSettings = await response.json();
       setSettings(nextSettings);
       setOpenaiKey("");
+      window.dispatchEvent(new Event(SETTINGS_UPDATED_EVENT));
       setOpen(false);
     } catch (saveError) {
       setError(

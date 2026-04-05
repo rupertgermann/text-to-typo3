@@ -8,6 +8,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ChatInterface } from "@/components/chat/ChatInterface";
 import { ConversationSidebar } from "@/components/conversations/conversation-sidebar";
 import { SettingsModal } from "@/components/settings/settings-modal";
+import { ModelPickerDropdown } from "@/components/settings/model-picker-dropdown";
 import { getEnv } from "@/lib/env";
 
 interface ConversationPageProps {
@@ -71,6 +72,7 @@ export default async function ConversationPage({
                 {user.display_name}
               </span>
             </div>
+            <ModelPickerDropdown className="hidden md:inline-flex" />
             <SettingsModal
               displayName={user.display_name}
               typo3BaseUrl={env.TYPO3_BASE_URL || "Not configured"}
