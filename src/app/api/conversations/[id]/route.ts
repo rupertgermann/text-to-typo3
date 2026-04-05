@@ -2,7 +2,7 @@ import { type NextRequest } from "next/server";
 import { eq, and, asc } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { conversations, messages } from "@/lib/db/schema";
-import { getSession } from "@/lib/session";
+import { getAuthenticatedUser } from "@/lib/auth";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -10,8 +10,8 @@ export async function GET(
   _request: NextRequest,
   { params }: RouteContext,
 ) {
-  const session = await getSession();
-  if (!session.userId) {
+  const auth = await getAuthenticatedUser();
+  if (!auth) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -20,7 +20,7 @@ export async function GET(
   const conversation = await db.query.conversations.findFirst({
     where: and(
       eq(conversations.id, id),
-      eq(conversations.user_id, session.userId),
+      eq(conversations.user_id, auth.user.id),
     ),
   });
 
@@ -40,8 +40,8 @@ export async function PATCH(
   request: NextRequest,
   { params }: RouteContext,
 ) {
-  const session = await getSession();
-  if (!session.userId) {
+  const auth = await getAuthenticatedUser();
+  if (!auth) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -50,7 +50,7 @@ export async function PATCH(
   const conversation = await db.query.conversations.findFirst({
     where: and(
       eq(conversations.id, id),
-      eq(conversations.user_id, session.userId),
+      eq(conversations.user_id, auth.user.id),
     ),
   });
 
@@ -85,8 +85,8 @@ export async function DELETE(
   _request: NextRequest,
   { params }: RouteContext,
 ) {
-  const session = await getSession();
-  if (!session.userId) {
+  const auth = await getAuthenticatedUser();
+  if (!auth) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -95,7 +95,7 @@ export async function DELETE(
   const conversation = await db.query.conversations.findFirst({
     where: and(
       eq(conversations.id, id),
-      eq(conversations.user_id, session.userId),
+      eq(conversations.user_id, auth.user.id),
     ),
   });
 

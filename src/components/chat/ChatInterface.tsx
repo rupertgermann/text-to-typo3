@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport, type UIMessage } from "ai";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MessageBubble } from "./MessageBubble";
-import { useStreamingChat } from "@/hooks/useStreamingChat";
 import type { Message } from "@/lib/db/schema";
-import type { UIMessage } from "ai";
 import { Send, Square, Loader2 } from "lucide-react";
 
 interface ChatInterfaceProps {
@@ -32,9 +32,11 @@ export function ChatInterface({
 }: ChatInterfaceProps) {
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const { messages, status, error, sendMessage, stop } = useStreamingChat({
-    conversationId,
-    initialMessages: toUIMessages(initialMessages),
+  const { messages, status, error, sendMessage, stop } = useChat({
+    messages: toUIMessages(initialMessages),
+    transport: new DefaultChatTransport({
+      body: { conversationId },
+    }),
   });
 
   const isLoading = status === "submitted" || status === "streaming";
@@ -49,7 +51,7 @@ export function ChatInterface({
     const text = input.trim();
     if (!text || isLoading) return;
     setInput("");
-    await sendMessage(text);
+    await sendMessage({ text });
   };
 
   return (
@@ -116,7 +118,9 @@ export function ChatInterface({
               type="button"
               variant="outline"
               size="icon"
-              onClick={stop}
+              onClick={() => {
+                void stop();
+              }}
               title="Stop generating"
               className="h-10 w-10 shrink-0 rounded-xl"
             >

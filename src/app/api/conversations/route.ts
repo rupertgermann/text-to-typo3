@@ -2,16 +2,16 @@ import { type NextRequest } from "next/server";
 import { eq, desc } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { conversations } from "@/lib/db/schema";
-import { getSession } from "@/lib/session";
+import { getAuthenticatedUser } from "@/lib/auth";
 
 export async function GET() {
-  const session = await getSession();
-  if (!session.userId) {
+  const auth = await getAuthenticatedUser();
+  if (!auth) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const userConversations = await db.query.conversations.findMany({
-    where: eq(conversations.user_id, session.userId),
+    where: eq(conversations.user_id, auth.user.id),
     orderBy: [desc(conversations.updated_at)],
   });
 
@@ -19,8 +19,8 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const session = await getSession();
-  if (!session.userId) {
+  const auth = await getAuthenticatedUser();
+  if (!auth) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -39,7 +39,7 @@ export async function POST(request: NextRequest) {
   const [conversation] = await db
     .insert(conversations)
     .values({
-      user_id: session.userId,
+      user_id: auth.user.id,
       title,
     })
     .returning();

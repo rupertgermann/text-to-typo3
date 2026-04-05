@@ -1,8 +1,10 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { sessions } from "@/lib/db/schema";
+import { sessions, users, type User } from "@/lib/db/schema";
 import { encrypt, decrypt } from "@/lib/crypto";
 import { getEnv } from "@/lib/env";
+import { getSession, type SessionData } from "@/lib/session";
+import type { IronSession } from "iron-session";
 
 /**
  * Retrieves a valid access token for the given session, refreshing it
@@ -63,4 +65,95 @@ export async function getValidAccessToken(
     .where(eq(sessions.id, sessionId));
 
   return tokens.access_token;
+}
+
+export interface AuthenticatedUserContext {
+  accessToken: string;
+  session: IronSession<SessionData>;
+  user: User;
+}
+
+/**
+ * Validates the cookie-backed session against the database and ensures the
+ * TYPO3 OAuth access token is still usable.
+ */
+export async function getAuthenticatedUser():
+  Promise<AuthenticatedUserContext | null> {
+  const session = await getSession();
+
+  if (!session.userId || !session.sessionId) {
+    return null;
+  }
+
+  const dbSession = await db.query.sessions.findFirst({
+    where: and(
+      eq(sessions.id, session.sessionId),
+      eq(sessions.user_id, session.userId),
+    ),
+  });
+
+  if (!dbSession) {
+    return null;
+  }
+
+  const user = await db.query.users.findFirst({
+    where: eq(users.id, session.userId),
+  });
+
+  if (!user) {
+    return null;
+  }
+
+  const accessToken = await getValidAccessToken(session.sessionId);
+
+  if (!accessToken) {
+    return null;
+  }
+
+  return { accessToken, session, user };
+}
+
+async function revokeToken(token: string): Promise<void> {
+  const env = getEnv();
+
+  await fetch(`${env.TYPO3_BASE_URL}/oauth/revoke`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      token,
+      client_id: env.TYPO3_OAUTH_CLIENT_ID,
+      client_secret: env.TYPO3_OAUTH_CLIENT_SECRET,
+    }),
+  });
+}
+
+/**
+ * Best-effort TYPO3 token revocation used during logout. Failures should not
+ * block local session cleanup.
+ */
+export async function revokeSessionTokens(sessionId: string): Promise<void> {
+  const session = await db.query.sessions.findFirst({
+    where: eq(sessions.id, sessionId),
+  });
+
+  if (!session) {
+    return;
+  }
+
+  const tokens: string[] = [];
+
+  try {
+    const accessToken = await getValidAccessToken(sessionId);
+    if (accessToken) {
+      tokens.push(accessToken);
+    }
+  } catch {
+    // Ignore refresh/retrieval failures and still attempt to revoke what we have.
+  }
+
+  if (session.refresh_token) {
+    tokens.push(decrypt(session.refresh_token));
+  }
+
+  await Promise.allSettled(tokens.map((token) => revokeToken(token)));
 }

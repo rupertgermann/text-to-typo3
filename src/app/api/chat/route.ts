@@ -1,21 +1,28 @@
 import { type NextRequest } from "next/server";
 import { eq, and, asc } from "drizzle-orm";
-import { streamText } from "ai";
+import { streamText, convertToModelMessages, type UIMessage } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { db } from "@/lib/db";
 import { conversations, messages } from "@/lib/db/schema";
-import { getSession } from "@/lib/session";
+import { getAuthenticatedUser } from "@/lib/auth";
 import { getEnv } from "@/lib/env";
 
 const SYSTEM_PROMPT = `You are a helpful assistant for TYPO3 CMS. You help users manage their TYPO3 website by answering questions, providing guidance, and assisting with content management tasks. Be concise, accurate, and helpful. When discussing TYPO3-specific features, refer to the correct TYPO3 version terminology and best practices.`;
 
+function getTextFromUIMessage(message: UIMessage): string {
+  return message.parts
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("");
+}
+
 export async function POST(request: NextRequest) {
   // Validate session
-  const session = await getSession();
-  if (!session.userId) {
+  const auth = await getAuthenticatedUser();
+  if (!auth) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const userId = session.userId;
+  const userId = auth.user.id;
 
   let body: { messages?: unknown; conversationId?: unknown };
   try {
@@ -30,10 +37,7 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "conversationId is required" }, { status: 400 });
   }
 
-  if (
-    !Array.isArray(incomingMessages) ||
-    incomingMessages.length === 0
-  ) {
+  if (!Array.isArray(incomingMessages) || incomingMessages.length === 0) {
     return Response.json({ error: "messages array is required" }, { status: 400 });
   }
 
@@ -50,14 +54,13 @@ export async function POST(request: NextRequest) {
   }
 
   // Get the last incoming message (the new user message)
-  const lastMessage = incomingMessages[incomingMessages.length - 1] as {
-    role: string;
-    content: string;
-  };
+  const uiMessages = incomingMessages as UIMessage[];
+  const lastMessage = uiMessages[uiMessages.length - 1];
+  const userText = lastMessage ? getTextFromUIMessage(lastMessage) : "";
 
-  if (!lastMessage || lastMessage.role !== "user" || !lastMessage.content) {
+  if (!lastMessage || lastMessage.role !== "user" || !userText.trim()) {
     return Response.json(
-      { error: "Last message must be a user message with content" },
+      { error: "Last message must be a user message with text content" },
       { status: 400 },
     );
   }
@@ -66,10 +69,7 @@ export async function POST(request: NextRequest) {
   await db.insert(messages).values({
     conversation_id: conversationId,
     role: "user",
-    content:
-      typeof lastMessage.content === "string"
-        ? lastMessage.content
-        : JSON.stringify(lastMessage.content),
+    content: userText,
   });
 
   // Load full message history from DB for this conversation
@@ -78,11 +78,18 @@ export async function POST(request: NextRequest) {
     orderBy: [asc(messages.created_at)],
   });
 
-  // Map DB messages to the ModelMessage format for the AI SDK
-  const modelMessages = dbMessages.map((msg) => ({
+  const originalMessages: UIMessage[] = dbMessages.map((msg) => ({
+    id: msg.id,
     role: msg.role as "user" | "assistant" | "system",
-    content: msg.content,
+    parts: [{ type: "text", text: msg.content }],
   }));
+
+  const modelMessages = await convertToModelMessages(
+    originalMessages.map((message) => ({
+      role: message.role,
+      parts: message.parts,
+    })),
+  );
 
   const env = getEnv();
   const openai = createOpenAI({
@@ -93,23 +100,25 @@ export async function POST(request: NextRequest) {
     model: openai("gpt-4o-mini"),
     system: SYSTEM_PROMPT,
     messages: modelMessages,
-    onFinish: async (event) => {
-      const assistantText = event.text;
+  });
 
-      // Save the assistant's full response to the DB
-      await db.insert(messages).values({
-        conversation_id: conversationId,
-        role: "assistant",
-        content: assistantText,
-      });
+  return result.toUIMessageStreamResponse({
+    originalMessages,
+    onFinish: async ({ responseMessage }) => {
+      const assistantText = getTextFromUIMessage(responseMessage);
 
-      // Update the conversation's updated_at timestamp
+      if (assistantText.trim()) {
+        await db.insert(messages).values({
+          conversation_id: conversationId,
+          role: "assistant",
+          content: assistantText,
+        });
+      }
+
       await db
         .update(conversations)
         .set({ updated_at: Math.floor(Date.now() / 1000) })
         .where(eq(conversations.id, conversationId));
     },
   });
-
-  return result.toTextStreamResponse();
 }

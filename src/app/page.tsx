@@ -1,22 +1,12 @@
 import { redirect } from "next/navigation";
 import { eq } from "drizzle-orm";
-import { getSession } from "@/lib/session";
+import { getAuthenticatedUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { users, conversations } from "@/lib/db/schema";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { conversations } from "@/lib/db/schema";
 
 export default async function Home() {
-  const session = await getSession();
-
-  if (!session.userId) {
-    redirect("/api/auth/login");
-  }
-
-  const user = await db.query.users.findFirst({
-    where: eq(users.id, session.userId),
-  });
+  const auth = await getAuthenticatedUser();
+  const user = auth?.user;
 
   if (!user) {
     redirect("/api/auth/login");

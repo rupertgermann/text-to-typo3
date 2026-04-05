@@ -27,7 +27,7 @@ export async function proxy(request: NextRequest) {
     cookieName: "text-to-typo3-session",
   });
 
-  if (!session.userId) {
+  if (!session.userId || !session.sessionId) {
     return NextResponse.redirect(new URL("/api/auth/login", request.url));
   }
 
