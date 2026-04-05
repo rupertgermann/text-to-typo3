@@ -46,6 +46,8 @@ The chat interface is designed around the upstream TYPO3 MCP server toolset desc
 
 The app supports multi-step MCP runs, so a single user request can read page context, inspect table schema, and continue into follow-up TYPO3 tool calls before the response is finalized.
 
+OpenAI and LM Studio models both use this toolset. The app routes provider requests differently where needed, but TYPO3-side MCP capabilities stay the same.
+
 For content creation and updates, TYPO3 users should have:
 
 - access to the relevant pages and tables
@@ -53,6 +55,8 @@ For content creation and updates, TYPO3 users should have:
 - permission to create and edit records in the target TYPO3 area
 
 The chat flow expects `WriteTable` create and update operations to accept a `data` object containing the field values to write. When TYPO3 returns validation feedback, the assistant can inspect schema details and retry with corrected input in the same response.
+
+For LM Studio mutation requests, the tool loop is kept in tool-calling mode until a write succeeds or the request reaches the configured step limit, which helps local models avoid stopping after the first read tool call.
 
 ## `.env.local` Values And Where They Come From
 

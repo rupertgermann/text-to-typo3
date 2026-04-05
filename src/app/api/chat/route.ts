@@ -38,6 +38,37 @@ function supportsBuiltInMcpTool(modelId: string): boolean {
   return modelId.trim().toLowerCase() === "gpt-5.4-nano";
 }
 
+function isTypo3MutationRequest(text: string): boolean {
+  return /\b(add|append|change|create|delete|edit|insert|move|publish|remove|rename|set|translate|update|write)\b/i.test(
+    text,
+  );
+}
+
+function isWriteToolName(toolName: string): boolean {
+  return /write|create|update|delete|translate/i.test(toolName);
+}
+
+function hasSuccessfulWriteResult(
+  steps: Array<{
+    toolResults?: Array<{ toolName: string; output?: unknown }>;
+  }>,
+): boolean {
+  return steps.some((step) =>
+    (step.toolResults ?? []).some((toolResult) => {
+      if (!isWriteToolName(toolResult.toolName)) {
+        return false;
+      }
+
+      if (!toolResult.output || typeof toolResult.output !== "object") {
+        return true;
+      }
+
+      const output = toolResult.output as { isError?: unknown };
+      return output.isError !== true;
+    }),
+  );
+}
+
 export async function POST(request: NextRequest) {
   // Validate session
   const auth = await getAuthenticatedUser();
@@ -190,31 +221,47 @@ export async function POST(request: NextRequest) {
     baseURL: useLmStudio ? userSettings.lmstudioBaseUrl || undefined : undefined,
   });
 
-  const tools = useLmStudio
-    ? undefined
-    : supportsBuiltInMcpTool(modelId)
-      ? {
-          typo3: provider.tools.mcp({
-            serverLabel: "typo3",
-            serverUrl: getTypo3McpUrl(),
-            serverDescription:
-              "TYPO3 MCP server for reading and updating TYPO3 content and configuration.",
-            headers: auth.accessToken
-              ? { Authorization: `Bearer ${auth.accessToken}` }
-              : undefined,
-          }),
-        }
-      : await getMcpTools({
-          sessionId: auth.session.sessionId || `token:${auth.user.id}`,
-          accessToken: auth.accessToken,
-        });
+  const tools = !useLmStudio && supportsBuiltInMcpTool(modelId)
+    ? {
+        typo3: provider.tools.mcp({
+          serverLabel: "typo3",
+          serverUrl: getTypo3McpUrl(),
+          serverDescription:
+            "TYPO3 MCP server for reading and updating TYPO3 content and configuration.",
+          headers: auth.accessToken
+            ? { Authorization: `Bearer ${auth.accessToken}` }
+            : undefined,
+        }),
+      }
+    : await getMcpTools({
+        sessionId: auth.session.sessionId || `token:${auth.user.id}`,
+        accessToken: auth.accessToken,
+      });
 
   const result = streamText({
-    model: provider.responses(modelId),
+    model: useLmStudio ? provider.chat(modelId) : provider.responses(modelId),
     system: [SYSTEM_PROMPT, env.TYPO3_MCP_SYSTEM_PROMPT].filter(Boolean).join("\n\n"),
     messages: modelMessages,
     stopWhen: stepCountIs(5),
     tools,
+    prepareStep: ({ stepNumber, steps }) => {
+      if (
+        !useLmStudio ||
+        !isTypo3MutationRequest(userText) ||
+        hasSuccessfulWriteResult(steps)
+      ) {
+        return undefined;
+      }
+
+      // Local chat-completions models tend to answer too early after a read
+      // result, so keep the loop in tool-calling mode until a write succeeds
+      // or the global step limit is reached.
+      if (stepNumber < 4) {
+        return { toolChoice: "required" as const };
+      }
+
+      return undefined;
+    },
   });
 
   return result.toUIMessageStreamResponse({

@@ -44,5 +44,7 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  // Exclude all Next.js internal dev/runtime assets so HMR can talk directly
+  // to the dev server without going through auth proxy logic first.
+  matcher: ["/((?!_next|favicon.ico).*)"],
 };

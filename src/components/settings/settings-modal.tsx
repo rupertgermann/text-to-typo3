@@ -231,7 +231,7 @@ export function SettingsModal({
           </Button>
         }
       />
-      <DialogContent className="max-w-4xl">
+      <DialogContent className="w-[min(72rem,calc(100vw-2rem))] max-w-none sm:max-w-none">
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
           <DialogDescription>

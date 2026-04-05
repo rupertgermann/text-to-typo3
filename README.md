@@ -11,6 +11,7 @@
 - Connects server-side to the TYPO3 MCP endpoint and forwards the authenticated TYPO3 bearer token on every MCP request.
 - Supports multi-step MCP tool execution so the assistant can inspect TYPO3 state, fetch schema details, and continue to follow-up tool calls inside the same response.
 - Guides TYPO3 write operations toward schema-aware retries when a `WriteTable` call returns validation or missing-input feedback.
+- Supports TYPO3 tool calling for both OpenAI and LM Studio models through the same server-side MCP bridge, with provider-specific model routing where needed.
 - Renders MCP tool calls inline in the chat and in a filterable Activity sidebar.
 - Supports message editing and rerunning from an earlier user prompt.
 - Supports image attachments through drag-and-drop or the file picker.
@@ -138,6 +139,8 @@ Open [http://localhost:3000](http://localhost:3000).
 
 In OAuth mode, unauthenticated requests redirect to `/api/auth/login`, which starts the TYPO3 OAuth flow. In token-based MCP mode, the app redirects directly into the chat UI without the browser OAuth round-trip.
 
+Next.js development requests under `/_next/*` bypass the auth proxy so Fast Refresh and other dev-runtime internals can connect directly to the dev server.
+
 ### Production build
 
 ```bash
@@ -202,7 +205,7 @@ pnpm db:studio
 - Read and write tool calls are rendered as collapsible cards in the chat thread.
 - The Activity sidebar shows the same tool traffic in chronological order with read/write filters.
 - Write results can expose a direct TYPO3 backend record link when the MCP response includes record metadata.
-- The default TYPO3 MCP workflows supported by the upstream server include page navigation, table discovery, schema inspection, record reads, search, flexform schema inspection, and `WriteTable` record creation or updates.
+- The upstream TYPO3 MCP server toolset used by the app includes `GetPageTree`, `GetPage`, `ListTables`, `ReadTable`, `Search`, `GetTableSchema`, `GetFlexFormSchema`, and `WriteTable`.
 
 ### Model selection
 
@@ -212,6 +215,8 @@ pnpm db:studio
 - Context-window information is shown in the header picker and in settings tooltips.
 - The default selected model falls back to `gpt-5.4-mini` when no user preference is stored.
 - `gpt-5.4-nano` uses the provider's built-in MCP server tool integration; other OpenAI-compatible models use the app's TYPO3 MCP bridge.
+- LM Studio models use the chat-completions path and the same server-side TYPO3 MCP bridge as the app-managed OpenAI path.
+- For TYPO3 mutation requests on LM Studio models, the chat loop keeps tool calling active until a write succeeds or the configured step cap is reached.
 
 ## UI Overview
 

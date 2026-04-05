@@ -14,6 +14,7 @@ Expected result:
 
 - The app loads without build errors.
 - Unauthenticated access redirects to TYPO3 OAuth login.
+- During `pnpm dev`, Fast Refresh works without restarting the app for ordinary UI and route edits.
 
 ## 2. Authentication
 
@@ -121,6 +122,8 @@ Expected result:
 3. If using OpenAI, select a different model.
 4. If using LM Studio, enter the base URL and click `Fetch models`.
 5. Use the header model picker to switch models.
+6. With an LM Studio model selected, send a TYPO3 read request such as `What pages exist on my TYPO3 site?`
+7. With the same LM Studio model, send a TYPO3 mutation request such as `Add 3 text content examples to page 67`
 
 Expected result:
 
@@ -128,6 +131,8 @@ Expected result:
 - Model context-window hints appear in the settings cards and header picker.
 - Model changes persist after refresh.
 - LM Studio models load when the endpoint is reachable.
+- LM Studio models can call TYPO3 MCP tools through the app.
+- LM Studio mutation requests can continue through multiple tool steps instead of stopping after the first read call.
 
 ## 10. Scaffold CLI
 
