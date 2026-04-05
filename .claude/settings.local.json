@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo:*)",
+      "Bash(npm audit:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(git checkout:*)",
+      "Bash(mkdir -p /Users/rupertgermann/AI/amp-designer3/src/app/api/projects/\\\\[id\\\\]/files/\\\\[fileId\\\\]/analyse)",
+      "Bash(mkdir -p /Users/rupertgermann/AI/amp-designer3/src/app/api/projects/\\\\[id\\\\]/files/\\\\[fileId\\\\]/components)",
+      "Bash(mkdir -p /Users/rupertgermann/AI/amp-designer3/src/app/api/projects/\\\\[id\\\\]/suggestions)",
+      "Bash(npx tsc:*)",
+      "Bash(npm run:*)",
+      "Bash(gh api:*)",
+      "Bash(git init:*)",
+      "Bash(git commit:*)",
+      "Bash(gh issue:*)"
+    ]
+  }
+}
