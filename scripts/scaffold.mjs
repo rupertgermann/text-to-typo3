@@ -11,6 +11,7 @@ const DEFAULT_TEST_EDITOR_EMAIL = "editor@example.com";
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_EMAIL = "admin@example.com";
 const DEFAULT_PHP_VERSION = "8.3";
+const SCAFFOLD_STATE_VERSION = 2;
 
 function parseArgs(argv) {
   const options = {
@@ -70,6 +71,10 @@ function commandString(command, args = []) {
   return [command, ...args].map(shellQuote).join(" ");
 }
 
+function shellCommandString(commandLine) {
+  return commandString(process.env.SHELL || "bash", ["-lc", commandLine]);
+}
+
 function humanList(values) {
   if (values.length === 0) return "";
   if (values.length === 1) return values[0];
@@ -113,6 +118,10 @@ async function run(command, args, { cwd, env } = {}) {
   });
 }
 
+async function runShell(commandLine, options = {}) {
+  return run(process.env.SHELL || "bash", ["-lc", commandLine], options);
+}
+
 async function canRun(command) {
   return await new Promise((resolve) => {
     const child = spawn(command, ["--version"], {
@@ -128,6 +137,26 @@ function generateSecret(prefix) {
   return `${prefix}_${crypto.randomBytes(18).toString("base64url")}`;
 }
 
+function normalizeCommandHook(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+async function writeFileIfChanged(filePath, content) {
+  const existing = (await fileExists(filePath)) ? await readFile(filePath, "utf8") : null;
+  if (existing === content) {
+    return false;
+  }
+
+  await ensureDir(path.dirname(filePath));
+  await writeFile(filePath, content, "utf8");
+  return true;
+}
+
 function resolveProjectName(instanceDir, overrideName) {
   if (overrideName) return overrideName;
   const base = path.basename(path.resolve(instanceDir));
@@ -137,8 +166,78 @@ function resolveProjectName(instanceDir, overrideName) {
     .replace(/^-+|-+$/g, "") || "typo3-instance";
 }
 
+function createShellStep(name, commandLine, env = {}) {
+  return {
+    name,
+    shellCommandLine: commandLine,
+    env,
+  };
+}
+
+function createNoteStep(name, note) {
+  return { name, note };
+}
+
+function buildScaffoldSummary({
+  projectName,
+  instanceDir,
+  backendUrl,
+  credentials,
+  oauthClientId,
+  oauthClientSecret,
+  hooks,
+}) {
+  const hookLines = [
+    `- OAuth client registration hook: ${hooks.oauthClientCommand ? "configured" : "not configured"}`,
+    `- Workspace creation hook: ${hooks.workspaceCommand ? "configured" : "not configured"}`,
+    `- Demo content hook: ${hooks.demoContentCommand ? "configured" : "not configured"}`,
+    `- News seeding hook: ${hooks.newsCommand ? "configured" : "not configured"}`,
+  ];
+
+  const manualSteps = [];
+  if (!hooks.workspaceCommand) {
+    manualSteps.push("Set TYPO3_SCAFFOLD_WORKSPACE_COMMAND to create the editorial workspace automatically.");
+  }
+  if (!hooks.demoContentCommand) {
+    manualSteps.push("Set TYPO3_SCAFFOLD_DEMO_CONTENT_COMMAND to seed real pages and content elements.");
+  }
+  if (!hooks.newsCommand) {
+    manualSteps.push("Set TYPO3_SCAFFOLD_NEWS_COMMAND if EXT:news is available and you want a demo article.");
+  }
+  if (!hooks.oauthClientCommand) {
+    manualSteps.push("Set TYPO3_SCAFFOLD_OAUTH_CLIENT_COMMAND to register the OAuth client automatically.");
+  }
+
+  return [
+    "# TYPO3 Scaffold Summary",
+    "",
+    `- Project name: ${projectName}`,
+    `- Instance dir: ${instanceDir}`,
+    `- TYPO3 backend URL: ${backendUrl}`,
+    `- Chat app start command: pnpm dev`,
+    `- OAuth client ID: ${oauthClientId}`,
+    `- OAuth client secret: ${oauthClientSecret}`,
+    `- Test editor username: ${credentials.editorUsername}`,
+    `- Test editor password: ${credentials.editorPassword}`,
+    "",
+    "## Automation Hooks",
+    "",
+    ...hookLines,
+    "",
+    "## Manual Follow-Up",
+    "",
+    manualSteps.length > 0
+      ? manualSteps.map((line) => `- ${line}`)
+      : ["- All scaffold hooks are configured."],
+    "",
+  ]
+    .flat()
+    .join("\n");
+}
+
 function buildPlan(config) {
-  const backendUrl = `https://${config.projectName}.ddev.site/typo3/`;
+  const siteUrl = `https://${config.projectName}.ddev.site`;
+  const backendUrl = `${siteUrl}/typo3/`;
   const credentials = {
     adminUsername: process.env.TYPO3_SETUP_ADMIN_USERNAME || DEFAULT_ADMIN_USERNAME,
     adminPassword: process.env.TYPO3_SETUP_ADMIN_PASSWORD || generateSecret("Admin"),
@@ -153,9 +252,36 @@ function buildPlan(config) {
     process.env.TYPO3_OAUTH_CLIENT_ID || generateSecret("client");
   const oauthClientSecret =
     process.env.TYPO3_OAUTH_CLIENT_SECRET || generateSecret("secret");
+  const hooks = {
+    workspaceCommand: normalizeCommandHook(
+      process.env.TYPO3_SCAFFOLD_WORKSPACE_COMMAND,
+    ),
+    demoContentCommand: normalizeCommandHook(
+      process.env.TYPO3_SCAFFOLD_DEMO_CONTENT_COMMAND,
+    ),
+    newsCommand: normalizeCommandHook(process.env.TYPO3_SCAFFOLD_NEWS_COMMAND),
+    oauthClientCommand: normalizeCommandHook(
+      process.env.TYPO3_SCAFFOLD_OAUTH_CLIENT_COMMAND,
+    ),
+  };
+  const runtimeEnv = {
+    TYPO3_BASE_URL: siteUrl,
+    TYPO3_OAUTH_CLIENT_ID: oauthClientId,
+    TYPO3_OAUTH_CLIENT_SECRET: oauthClientSecret,
+    TYPO3_TEST_EDITOR_USERNAME: credentials.editorUsername,
+    TYPO3_TEST_EDITOR_PASSWORD: credentials.editorPassword,
+    TYPO3_TEST_EDITOR_EMAIL: credentials.editorEmail,
+    TYPO3_SCAFFOLD_PROJECT_NAME: config.projectName,
+    TYPO3_SCAFFOLD_INSTANCE_DIR: config.instanceDir,
+    TYPO3_SCAFFOLD_BACKEND_URL: backendUrl,
+    TYPO3_SCAFFOLD_SITE_NAME:
+      process.env.TYPO3_SCAFFOLD_SITE_NAME || config.projectName,
+    TYPO3_SCAFFOLD_WORKSPACE_NAME:
+      process.env.TYPO3_SCAFFOLD_WORKSPACE_NAME || "Editorial Workspace",
+  };
 
   const envFile = [
-    `TYPO3_BASE_URL=https://${config.projectName}.ddev.site`,
+    `TYPO3_BASE_URL=${siteUrl}`,
     `TYPO3_OAUTH_CLIENT_ID=${oauthClientId}`,
     `TYPO3_OAUTH_CLIENT_SECRET=${oauthClientSecret}`,
     `TYPO3_TEST_EDITOR_USERNAME=${credentials.editorUsername}`,
@@ -163,12 +289,64 @@ function buildPlan(config) {
     `TYPO3_TEST_EDITOR_EMAIL=${credentials.editorEmail}`,
   ].join("\n");
 
-  return {
+  const summaryMarkdown = buildScaffoldSummary({
+    projectName: config.projectName,
+    instanceDir: config.instanceDir,
     backendUrl,
     credentials,
     oauthClientId,
     oauthClientSecret,
+    hooks,
+  });
+
+  const optionalHookSteps = [
+    hooks.workspaceCommand
+      ? createShellStep(
+          "Create editorial workspace",
+          hooks.workspaceCommand,
+          runtimeEnv,
+        )
+      : createNoteStep(
+          "Create editorial workspace",
+          "No TYPO3_SCAFFOLD_WORKSPACE_COMMAND configured. Set it to create the editorial workspace automatically.",
+        ),
+    hooks.demoContentCommand
+      ? createShellStep(
+          "Seed page tree and content",
+          hooks.demoContentCommand,
+          runtimeEnv,
+        )
+      : createNoteStep(
+          "Seed page tree and content",
+          "No TYPO3_SCAFFOLD_DEMO_CONTENT_COMMAND configured. Set it to seed real pages and content elements instead of only the styleguide demo data.",
+        ),
+    hooks.newsCommand
+      ? createShellStep("Seed news article", hooks.newsCommand, runtimeEnv)
+      : createNoteStep(
+          "Seed news article",
+          "No TYPO3_SCAFFOLD_NEWS_COMMAND configured. Set it if EXT:news is available.",
+        ),
+    hooks.oauthClientCommand
+      ? createShellStep(
+          "Register OAuth client",
+          hooks.oauthClientCommand,
+          runtimeEnv,
+        )
+      : createNoteStep(
+          "Register OAuth client",
+          "No TYPO3_SCAFFOLD_OAUTH_CLIENT_COMMAND configured. Use the generated credentials in .env.local or provide the hook to automate this step.",
+        ),
+  ];
+
+  return {
+    backendUrl,
+    siteUrl,
+    credentials,
+    oauthClientId,
+    oauthClientSecret,
     envFile,
+    summaryMarkdown,
+    hooks,
     steps: [
       {
         name: "Configure DDEV project",
@@ -253,30 +431,37 @@ function buildPlan(config) {
         args: ["typo3", "extension:activate", "styleguide"],
       },
       {
-        name: "Seed demo TCA content",
+        name: "Seed styleguide demo content",
         command: "ddev",
         args: ["typo3", "styleguide:generate", "-c"],
       },
-      {
-        name: "Register OAuth client",
-        note:
-          "No project-specific registration command is wired yet. Use the generated credentials in .env.local to create the TYPO3 OAuth client, or provide TYPO3_SCAFFOLD_OAUTH_CLIENT_COMMAND to automate this step.",
-      },
+      ...optionalHookSteps,
       {
         name: "Write .env.local",
         writeFile: ".env.local",
         content: envFile,
       },
       {
+        name: "Write scaffold summary",
+        writeFile: path.join(config.instanceDir, ".codex-scaffold", "summary.md"),
+        content: summaryMarkdown,
+      },
+      {
         name: "Persist scaffold state",
         writeFile: path.join(config.instanceDir, ".codex-scaffold", "state.json"),
         content: JSON.stringify(
           {
-            version: 1,
+            version: SCAFFOLD_STATE_VERSION,
             projectName: config.projectName,
             instanceDir: config.instanceDir,
             backendUrl,
+            siteUrl,
             oauthClientId,
+            oauthClientSecret,
+            envFile,
+            summaryMarkdown,
+            hooks,
+            credentials,
             createdAt: new Date().toISOString(),
           },
           null,
@@ -289,6 +474,12 @@ function buildPlan(config) {
 
 async function printHelp() {
   console.log(`Usage: pnpm scaffold [--dry-run] [--force] [--instance-dir <dir>] [--php-version <version>] [--project-name <name>]`);
+  console.log("");
+  console.log("Optional automation hooks:");
+  console.log("  TYPO3_SCAFFOLD_WORKSPACE_COMMAND      Shell command that creates the editorial workspace");
+  console.log("  TYPO3_SCAFFOLD_DEMO_CONTENT_COMMAND   Shell command that seeds real pages/content");
+  console.log("  TYPO3_SCAFFOLD_NEWS_COMMAND           Shell command that seeds an EXT:news article");
+  console.log("  TYPO3_SCAFFOLD_OAUTH_CLIENT_COMMAND   Shell command that registers the OAuth client");
 }
 
 async function main() {
@@ -306,12 +497,25 @@ async function main() {
 
   const statePath = path.join(instanceDir, ".codex-scaffold", "state.json");
   const envPath = path.join(repoRoot, ".env.local");
+  const summaryPath = path.join(instanceDir, ".codex-scaffold", "summary.md");
 
   if (!config.dryRun && (await fileExists(statePath)) && !config.force) {
     const existing = JSON.parse(await readFile(statePath, "utf8"));
     console.log(`Scaffold already set up for ${existing.projectName}.`);
     console.log(`TYPO3 backend URL: ${existing.backendUrl}`);
     console.log(`Chat app start command: pnpm dev`);
+
+    if (existing.version >= SCAFFOLD_STATE_VERSION) {
+      if (existing.envFile && !(await fileExists(envPath))) {
+        await writeFileIfChanged(envPath, existing.envFile);
+      }
+      if (existing.summaryMarkdown && !(await fileExists(summaryPath))) {
+        await writeFileIfChanged(summaryPath, existing.summaryMarkdown);
+      }
+    } else {
+      console.log("Generated helper files come from an older scaffold format. Re-run with --force to refresh them.");
+    }
+
     return;
   }
 
@@ -354,8 +558,19 @@ async function main() {
       if (config.dryRun) {
         continue;
       }
-      await ensureDir(path.dirname(targetPath));
-      await writeFile(targetPath, step.content, "utf8");
+      await writeFileIfChanged(targetPath, step.content);
+      continue;
+    }
+
+    if (step.shellCommandLine) {
+      console.log(`  ${shellCommandString(step.shellCommandLine)}`);
+      if (config.dryRun) {
+        continue;
+      }
+      await runShell(step.shellCommandLine, {
+        cwd: instanceDir,
+        env: step.env,
+      });
       continue;
     }
 
@@ -380,13 +595,16 @@ async function main() {
     return;
   }
 
-  if (!(await fileExists(envPath))) {
-    await writeFile(envPath, plan.envFile, "utf8");
+  if (config.force || !(await fileExists(envPath))) {
+    await writeFileIfChanged(envPath, plan.envFile);
   }
+
+  await writeFileIfChanged(summaryPath, plan.summaryMarkdown);
 
   console.log("");
   console.log("Scaffold complete.");
   console.log(`TYPO3 backend URL: ${plan.backendUrl}`);
+  console.log(`Project directory: ${plan.siteUrl}`);
   console.log(`Chat app start command: pnpm dev`);
   console.log(`Test editor credentials: ${plan.credentials.editorUsername} / ${plan.credentials.editorPassword}`);
   console.log(`Admin credentials: ${plan.credentials.adminUsername} / ${plan.credentials.adminPassword}`);
