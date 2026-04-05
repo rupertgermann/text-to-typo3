@@ -64,12 +64,12 @@ Add the core chat experience. On first login, automatically create a default con
 
 ### Acceptance criteria
 
-- [ ] Typing a message and pressing Enter sends it; the response streams token-by-token
-- [ ] AI responses render Markdown correctly (headings, code blocks, bold, lists)
-- [ ] A spinner/indicator is visible while the AI is generating
-- [ ] Clicking Stop mid-stream halts generation; the partial response is saved
-- [ ] After page refresh, all previous messages in the conversation are visible
-- [ ] Failed API calls (network error, OpenAI error) show an inline error message in the chat
+- [x] Typing a message and pressing Enter sends it; the response streams token-by-token
+- [x] AI responses render Markdown correctly (headings, code blocks, bold, lists)
+- [x] A spinner/indicator is visible while the AI is generating
+- [x] Clicking Stop mid-stream halts generation; the partial response is saved
+- [x] After page refresh, all previous messages in the conversation are visible
+- [x] Failed API calls (network error, OpenAI error) show an inline error message in the chat
 
 ---
 

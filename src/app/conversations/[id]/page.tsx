@@ -1,10 +1,11 @@
 import { redirect } from "next/navigation";
-import { eq, and } from "drizzle-orm";
+import { eq, and, asc } from "drizzle-orm";
 import { getSession } from "@/lib/session";
 import { db } from "@/lib/db";
 import { users, conversations, messages } from "@/lib/db/schema";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { ChatInterface } from "@/components/chat/ChatInterface";
 
 interface ConversationPageProps {
   params: Promise<{ id: string }>;
@@ -39,6 +40,11 @@ export default async function ConversationPage({
     redirect("/");
   }
 
+  const initialMessages = await db.query.messages.findMany({
+    where: eq(messages.conversation_id, id),
+    orderBy: [asc(messages.created_at)],
+  });
+
   const initials = user.display_name
     .split(" ")
     .map((n) => n[0])
@@ -68,11 +74,11 @@ export default async function ConversationPage({
         </div>
       </header>
 
-      {/* Chat area - placeholder for Phase 2 */}
-      <div className="flex flex-1 flex-col items-center justify-center text-muted-foreground">
-        <p>Start a conversation with your TYPO3 instance.</p>
-        <p className="text-sm mt-1">Chat functionality coming in Phase 2.</p>
-      </div>
+      {/* Chat interface */}
+      <ChatInterface
+        conversationId={id}
+        initialMessages={initialMessages}
+      />
     </div>
   );
 }
