@@ -17,6 +17,11 @@ interface MessageBubbleProps {
   allowRegenerate?: boolean;
   onEdit?: () => void;
   onRegenerate?: () => void;
+  onToolApprovalResponse?: (response: {
+    approved: boolean;
+    id: string;
+    reason?: string;
+  }) => void;
 }
 
 export function MessageBubble({
@@ -25,6 +30,7 @@ export function MessageBubble({
   allowRegenerate = false,
   onEdit,
   onRegenerate,
+  onToolApprovalResponse,
 }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
@@ -204,7 +210,13 @@ export function MessageBubble({
           }
 
           if (isToolUIPart(part)) {
-            return <ToolCallCard key={part.toolCallId} part={part as GenericToolPart} />;
+            return (
+              <ToolCallCard
+                key={part.toolCallId}
+                part={part as GenericToolPart}
+                onApprovalResponse={onToolApprovalResponse}
+              />
+            );
           }
 
           return null;

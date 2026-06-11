@@ -2,7 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport, type FileUIPart, type UIMessage } from "ai";
+import {
+  DefaultChatTransport,
+  lastAssistantMessageIsCompleteWithApprovalResponses,
+  type FileUIPart,
+  type UIMessage,
+} from "ai";
 import { Button } from "@/components/ui/button";
 import { MessageBubble } from "./MessageBubble";
 import type { Message } from "@/lib/db/schema";
@@ -19,6 +24,7 @@ import {
   RefreshCw,
   Search,
   Send,
+  ShieldCheck,
   Square,
   TriangleAlert,
   X,
@@ -35,6 +41,7 @@ import {
 } from "@/lib/starter-prompts";
 
 interface ChatInterfaceProps {
+  initialAutoApproveWrites: boolean;
   conversationId: string;
   initialMessages: Message[];
 }
@@ -93,6 +100,7 @@ function createPendingAttachments(files: File[]): PendingAttachment[] {
 }
 
 export function ChatInterface({
+  initialAutoApproveWrites,
   conversationId,
   initialMessages,
 }: ChatInterfaceProps) {
@@ -100,6 +108,10 @@ export function ChatInterface({
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [showActivity, setShowActivity] = useState(false);
+  const [autoApproveWrites, setAutoApproveWrites] = useState(
+    initialAutoApproveWrites,
+  );
+  const [savingAutoApproveWrites, setSavingAutoApproveWrites] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -109,6 +121,7 @@ export function ChatInterface({
     status,
     error,
     clearError,
+    addToolApprovalResponse,
     sendMessage,
     regenerate,
     stop,
@@ -117,6 +130,7 @@ export function ChatInterface({
     transport: new DefaultChatTransport({
       body: { conversationId },
     }),
+    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
   });
 
   const isLoading = status === "submitted" || status === "streaming";
@@ -218,6 +232,37 @@ export function ChatInterface({
     });
   };
 
+  const toggleAutoApproveWrites = async () => {
+    const nextValue = !autoApproveWrites;
+    setSavingAutoApproveWrites(true);
+    setComposerError(null);
+
+    try {
+      const response = await fetch(`/api/conversations/${conversationId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ autoApproveWrites: nextValue }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to update auto-approve setting");
+      }
+
+      const updated = await response.json() as {
+        auto_approve_writes?: number | null;
+      };
+      setAutoApproveWrites(Boolean(updated.auto_approve_writes));
+    } catch (toggleError) {
+      setComposerError(
+        toggleError instanceof Error
+          ? toggleError.message
+          : "Failed to update auto-approve setting",
+      );
+    } finally {
+      setSavingAutoApproveWrites(false);
+    }
+  };
+
   const selectStarterPrompt = (prompt: string) => {
     setEditingMessageId(null);
     setInput(prompt);
@@ -257,7 +302,22 @@ export function ChatInterface({
   return (
     <div className="flex flex-1 overflow-hidden">
       <div className="flex flex-1 flex-col overflow-hidden">
-        <div className="flex items-center justify-end border-b border-border/70 bg-background/60 px-4 py-3 backdrop-blur">
+        <div className="flex items-center justify-end gap-2 border-b border-border/70 bg-background/60 px-4 py-3 backdrop-blur">
+          <Button
+            type="button"
+            size="sm"
+            variant={autoApproveWrites ? "default" : "outline"}
+            className={autoApproveWrites ? "" : "bg-card/80"}
+            onClick={() => void toggleAutoApproveWrites()}
+            disabled={savingAutoApproveWrites || isLoading}
+          >
+            {savingAutoApproveWrites ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <ShieldCheck className="mr-2 h-4 w-4" />
+            )}
+            Auto-approve writes
+          </Button>
           <Button
             type="button"
             size="sm"
@@ -329,6 +389,9 @@ export function ChatInterface({
                       ? () => regenerate({ messageId: message.id })
                       : undefined
                   }
+                  onToolApprovalResponse={(approval) => {
+                    void addToolApprovalResponse(approval);
+                  }}
                 />
               ))
             )}

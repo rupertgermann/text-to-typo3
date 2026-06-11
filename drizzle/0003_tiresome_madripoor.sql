@@ -1,0 +1,1 @@
+ALTER TABLE `conversations` ADD `auto_approve_writes` integer;

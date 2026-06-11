@@ -105,6 +105,7 @@ export default async function ConversationPage({
         {/* Chat interface */}
         <ChatInterface
           conversationId={id}
+          initialAutoApproveWrites={Boolean(conversation.auto_approve_writes)}
           initialMessages={initialMessages}
         />
         </div>

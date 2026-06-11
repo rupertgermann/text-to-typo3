@@ -58,6 +58,24 @@ describe("single conversation routes", () => {
     expect(updated.title).toBe("Renamed");
   });
 
+  it("updates the auto-approve writes toggle for an owned conversation", async () => {
+    const patchResponse = await PATCH(
+      new Request("http://localhost/api/conversations/owned", {
+        method: "PATCH",
+        body: JSON.stringify({ autoApproveWrites: true }),
+      }) as never,
+      { params: Promise.resolve({ id: "owned" }) },
+    );
+    const updated = await patchResponse.json();
+    const stored = await db.query.conversations.findFirst({
+      where: eq(conversations.id, "owned"),
+    });
+
+    expect(patchResponse.status).toBe(200);
+    expect(updated.auto_approve_writes).toBe(1);
+    expect(stored?.auto_approve_writes).toBe(1);
+  });
+
   it("does not read, rename, or delete another user's conversation", async () => {
     await db.insert(users).values({
       id: "other-user",

@@ -5,6 +5,7 @@ import {
   stepCountIs,
   streamText,
   convertToModelMessages,
+  isToolUIPart,
   type LanguageModel,
   type UIMessage,
 } from "ai";
@@ -13,7 +14,11 @@ import { db } from "@/lib/db";
 import { conversations, messages } from "@/lib/db/schema";
 import { getAuthenticatedUser } from "@/lib/auth";
 import { getEnv } from "@/lib/env";
-import { getMcpTools, getTypo3McpUrl } from "@/lib/mcp";
+import {
+  getMcpTools,
+  getTypo3McpUrl,
+  listMcpToolNamesByOperation,
+} from "@/lib/mcp";
 import {
   getResolvedUserSettings,
   type ResolvedCustomProvider,
@@ -143,6 +148,15 @@ function supportsBuiltInMcpTool(modelId: string): boolean {
   return modelId.trim().toLowerCase() === "gpt-5.4-nano";
 }
 
+function hasApprovalResponseParts(message: UIMessage): boolean {
+  return (
+    message.role === "assistant" &&
+    message.parts.some(
+      (part) => isToolUIPart(part) && part.state === "approval-responded",
+    )
+  );
+}
+
 export async function POST(request: NextRequest) {
   // Validate session
   const auth = await getAuthenticatedUser();
@@ -235,6 +249,50 @@ export async function POST(request: NextRequest) {
     await db
       .delete(messages)
       .where(eq(messages.id, existingMessages[targetAssistantIndex].id));
+  } else if (lastMessage && hasApprovalResponseParts(lastMessage)) {
+    const existingMessages = await db.query.messages.findMany({
+      where: eq(messages.conversation_id, conversationId),
+      orderBy: [asc(messages.created_at)],
+    });
+    const targetMessageId = messageId ?? lastMessage.id;
+    const currentMessageIndex = existingMessages.findIndex(
+      (message) => message.id === targetMessageId,
+    );
+
+    if (currentMessageIndex === -1) {
+      return Response.json({ error: "Message not found" }, { status: 404 });
+    }
+
+    if (
+      currentMessageIndex !== existingMessages.length - 1 ||
+      existingMessages[currentMessageIndex]?.role !== "assistant"
+    ) {
+      return Response.json(
+        { error: "Only the latest assistant approval can be continued" },
+        { status: 400 },
+      );
+    }
+
+    const precedingUserMessage = existingMessages
+      .slice(0, currentMessageIndex)
+      .findLast((message) => message.role === "user");
+
+    if (!precedingUserMessage) {
+      return Response.json(
+        { error: "No user message found for approval continuation" },
+        { status: 400 },
+      );
+    }
+
+    userText = precedingUserMessage.content;
+
+    await db
+      .update(messages)
+      .set({
+        content: extractMessageText(lastMessage.parts),
+        tool_calls: serializeMessageParts(lastMessage.parts),
+      })
+      .where(eq(messages.id, targetMessageId));
   } else {
     userText = lastMessage ? extractMessageText(lastMessage.parts) : "";
 
@@ -383,25 +441,39 @@ export async function POST(request: NextRequest) {
         : undefined,
   });
   const maxSteps = getAgentLoopMaxSteps();
+  const requireWriteApproval = !Boolean(conversation.auto_approve_writes);
 
   let tools;
   try {
-    tools = !useLmStudio && !useCustomProvider && supportsBuiltInMcpTool(modelId)
-      ? {
-          typo3: provider.tools.mcp({
-            serverLabel: "typo3",
-            serverUrl: getTypo3McpUrl(),
-            serverDescription:
-              "TYPO3 MCP server for reading and updating TYPO3 content and configuration.",
-            headers: auth.accessToken
-              ? { Authorization: `Bearer ${auth.accessToken}` }
-              : undefined,
-          }),
-        }
-      : await getMcpTools({
+    if (!useLmStudio && !useCustomProvider && supportsBuiltInMcpTool(modelId)) {
+      const readToolNames = requireWriteApproval
+        ? (await listMcpToolNamesByOperation({
+            accessToken: auth.accessToken,
+          })).read
+        : [];
+
+      tools = {
+        typo3: provider.tools.mcp({
+          serverLabel: "typo3",
+          serverUrl: getTypo3McpUrl(),
+          serverDescription:
+            "TYPO3 MCP server for reading and updating TYPO3 content and configuration.",
+          requireApproval: requireWriteApproval
+            ? { never: { toolNames: readToolNames } }
+            : "never",
+          headers: auth.accessToken
+            ? { Authorization: `Bearer ${auth.accessToken}` }
+            : undefined,
+        }),
+      };
+    } else {
+      tools =
+        await getMcpTools({
           sessionId: auth.session.sessionId || `token:${auth.user.id}`,
           accessToken: auth.accessToken,
+          requireWriteApproval,
         });
+    }
   } catch (error) {
     return Response.json(
       { error: getChatErrorMessage(error, "mcp") },

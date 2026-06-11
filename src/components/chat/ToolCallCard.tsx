@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, ExternalLink, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -21,10 +21,21 @@ export interface GenericToolPart {
   input?: unknown;
   output?: unknown;
   errorText?: string;
+  approval?: {
+    id: string;
+    approved?: boolean;
+    reason?: string;
+  };
+  providerExecuted?: boolean;
   title?: string;
+  toolName?: string;
 }
 
 function getToolName(part: GenericToolPart): string {
+  if (part.toolName) {
+    return part.toolName;
+  }
+
   return part.type.replace(/^tool-/, "");
 }
 
@@ -64,6 +75,50 @@ function getBackendRecordUrl(part: GenericToolPart): string | null {
   return meta?.backendRecordUrl || null;
 }
 
+function parseObjectInput(input: unknown): Record<string, unknown> | null {
+  if (input && typeof input === "object" && !Array.isArray(input)) {
+    return input as Record<string, unknown>;
+  }
+
+  if (typeof input === "string") {
+    try {
+      const parsed = JSON.parse(input) as unknown;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function getApprovalLabel(part: GenericToolPart): string {
+  if (part.state === "approval-requested") {
+    return "pending approval";
+  }
+
+  if (part.state === "output-denied" || part.approval?.approved === false) {
+    return "rejected";
+  }
+
+  if (part.approval?.approved === true) {
+    return "approved";
+  }
+
+  const meta =
+    part.output && typeof part.output === "object"
+      ? (part.output as { _meta?: { approval?: string } })._meta
+      : undefined;
+
+  if (meta?.approval === "auto-approved") {
+    return "auto-approved";
+  }
+
+  return part.state.replace(/-/g, " ");
+}
+
 function safeStringify(value: unknown): string {
   if (value === undefined) {
     return "";
@@ -80,15 +135,31 @@ export function ToolCallCard({
   part,
   defaultOpen = false,
   compact = false,
+  onApprovalResponse,
 }: {
   part: GenericToolPart;
   defaultOpen?: boolean;
   compact?: boolean;
+  onApprovalResponse?: (response: {
+    approved: boolean;
+    id: string;
+    reason?: string;
+  }) => void;
 }) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
+  const [isOpen, setIsOpen] = useState(
+    defaultOpen || part.state === "approval-requested",
+  );
+  const [rejectionReason, setRejectionReason] = useState("");
   const toolName = useMemo(() => getToolName(part), [part]);
   const operation = useMemo(() => getOperationType(part), [part]);
   const backendRecordUrl = useMemo(() => getBackendRecordUrl(part), [part]);
+  const inputObject = useMemo(() => parseObjectInput(part.input), [part.input]);
+  const targetTable =
+    typeof inputObject?.table === "string" ? inputObject.table : null;
+  const fieldPayload = inputObject && "data" in inputObject
+    ? inputObject.data
+    : undefined;
+  const approvalLabel = getApprovalLabel(part);
 
   const toneClasses = {
     read: "border-sky-200 bg-sky-50/70 text-sky-950",
@@ -119,7 +190,7 @@ export function ToolCallCard({
           {isOpen ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
           <span className="truncate font-medium">{part.title || toolName}</span>
           <span className="rounded-full border border-current/15 px-2 py-0.5 text-[10px] uppercase tracking-wide opacity-75">
-            {part.state.replace(/-/g, " ")}
+            {approvalLabel}
           </span>
         </div>
 
@@ -133,6 +204,28 @@ export function ToolCallCard({
 
       {isOpen ? (
         <div className={cn("space-y-3 border-t border-current/10 px-3 py-3", compact ? "text-xs" : "text-sm")}>
+          {targetTable || fieldPayload !== undefined ? (
+            <div className="grid gap-2 md:grid-cols-2">
+              {targetTable ? (
+                <div className="space-y-1">
+                  <div className="font-medium opacity-80">Table</div>
+                  <div className="rounded-md bg-background/70 p-3 text-xs">
+                    {targetTable}
+                  </div>
+                </div>
+              ) : null}
+
+              {fieldPayload !== undefined ? (
+                <div className="space-y-1">
+                  <div className="font-medium opacity-80">Payload</div>
+                  <pre className="overflow-x-auto rounded-md bg-background/70 p-3 text-xs">
+                    <code>{safeStringify(fieldPayload)}</code>
+                  </pre>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           {part.input !== undefined ? (
             <div className="space-y-1">
               <div className="font-medium opacity-80">Input</div>
@@ -165,6 +258,47 @@ export function ToolCallCard({
                   Open TYPO3 Record
                 </Button>
               </a>
+            </div>
+          ) : null}
+
+          {part.state === "approval-requested" && part.approval && onApprovalResponse ? (
+            <div className="space-y-2 rounded-md bg-background/70 p-3">
+              <textarea
+                value={rejectionReason}
+                onChange={(event) => setRejectionReason(event.target.value)}
+                placeholder="Optional rejection reason"
+                className="min-h-16 w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+              />
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() =>
+                    onApprovalResponse?.({
+                      id: part.approval!.id,
+                      approved: true,
+                    })
+                  }
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  Approve
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    onApprovalResponse?.({
+                      id: part.approval!.id,
+                      approved: false,
+                      reason: rejectionReason.trim() || undefined,
+                    })
+                  }
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Reject
+                </Button>
+              </div>
             </div>
           ) : null}
         </div>

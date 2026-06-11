@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { asc, eq } from "drizzle-orm";
+import { isToolUIPart, type UIMessage } from "ai";
 import { POST } from "./route";
 import { db, setupTestDatabase, type TestDatabase } from "@/test/database";
 import { conversations, messages, userSettings, users } from "@/lib/db/schema";
@@ -426,6 +427,232 @@ describe("chat route integration", () => {
     expect(JSON.stringify(body)).not.toContain("test-mcp-token");
   });
 
+  it("pauses write tools until the user approves them", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({
+      chatResponses: [
+        createToolCallResponse({
+          toolCallId: "call-write-approval",
+          toolName: "WriteTable",
+          argumentsJson: JSON.stringify({
+            table: "tt_content",
+            data: { header: "Approved headline" },
+          }),
+        }),
+        createTextResponse({ text: "Approved write completed." }),
+      ],
+      models: [{ id: "fake-typo3-model", context_length: 4096 }],
+    });
+    await seedTokenModeConversation({
+      conversationId: "conversation-write-approval",
+      fakeMcpUrl: fakeMcp.url,
+      fakeModelUrl: fakeModel.url,
+      title: "Approval work",
+    });
+
+    const firstResponse = await postChat({
+      conversationId: "conversation-write-approval",
+      text: "Create a content element",
+    });
+
+    expect(firstResponse.status).toBe(200);
+    await firstResponse.text();
+    expect(fakeMcp.toolCalls).toEqual([]);
+
+    const pendingAssistant = await latestAssistantMessage(
+      "conversation-write-approval",
+    );
+    const pendingParts = deserializeMessageParts(pendingAssistant?.tool_calls) ?? [];
+    const pendingWrite = pendingParts.find(
+      (part) =>
+        typeof part === "object" &&
+        part !== null &&
+        (part as { type?: string }).type === "tool-WriteTable",
+    ) as {
+      approval?: { id: string };
+      input?: unknown;
+      state?: string;
+    } | undefined;
+
+    expect(pendingWrite?.state).toBe("approval-requested");
+    expect(pendingWrite?.input).toEqual({
+      table: "tt_content",
+      data: { header: "Approved headline" },
+    });
+
+    const approvedMessages = await persistedUiMessages(
+      "conversation-write-approval",
+      (part) => {
+        if (
+          !isToolUIPart(part) ||
+          part.type !== "tool-WriteTable" ||
+          part.state !== "approval-requested"
+        ) {
+          return part;
+        }
+
+        return {
+          ...part,
+          state: "approval-responded",
+          approval: {
+            id: part.approval.id,
+            approved: true,
+          },
+        } as UIMessage["parts"][number];
+      },
+    );
+    const approvalResponse = await postChatMessages({
+      conversationId: "conversation-write-approval",
+      messageId: pendingAssistant!.id,
+      messages: approvedMessages,
+    });
+
+    expect(approvalResponse.status).toBe(200);
+    await approvalResponse.text();
+
+    expect(fakeMcp.toolCalls).toEqual([
+      {
+        name: "WriteTable",
+        arguments: {
+          table: "tt_content",
+          data: { header: "Approved headline" },
+        },
+      },
+    ]);
+    expect(
+      (await latestAssistantMessage("conversation-write-approval"))?.content,
+    ).toBe("Approved write completed.");
+  });
+
+  it("rejects write tools without calling MCP and forwards the rejection reason", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({
+      chatResponses: [
+        createToolCallResponse({
+          toolCallId: "call-write-reject",
+          toolName: "WriteTable",
+          argumentsJson: JSON.stringify({
+            table: "tt_content",
+            data: { header: "Rejected headline" },
+          }),
+        }),
+        createTextResponse({ text: "I will adjust the write." }),
+      ],
+      models: [{ id: "fake-typo3-model", context_length: 4096 }],
+    });
+    await seedTokenModeConversation({
+      conversationId: "conversation-write-reject",
+      fakeMcpUrl: fakeMcp.url,
+      fakeModelUrl: fakeModel.url,
+      title: "Rejection work",
+    });
+
+    const firstResponse = await postChat({
+      conversationId: "conversation-write-reject",
+      text: "Create a content element",
+    });
+    expect(firstResponse.status).toBe(200);
+    await firstResponse.text();
+
+    const pendingAssistant = await latestAssistantMessage(
+      "conversation-write-reject",
+    );
+    const pendingParts = deserializeMessageParts(pendingAssistant?.tool_calls) ?? [];
+    const pendingWrite = pendingParts.find(
+      (part) =>
+        typeof part === "object" &&
+        part !== null &&
+        (part as { type?: string }).type === "tool-WriteTable",
+    ) as { approval?: { id: string }; state?: string } | undefined;
+
+    expect(pendingWrite?.state).toBe("approval-requested");
+
+    const rejectedMessages = await persistedUiMessages(
+      "conversation-write-reject",
+      (part) => {
+        if (
+          !isToolUIPart(part) ||
+          part.type !== "tool-WriteTable" ||
+          part.state !== "approval-requested"
+        ) {
+          return part;
+        }
+
+        return {
+          ...part,
+          state: "approval-responded",
+          approval: {
+            id: part.approval.id,
+            approved: false,
+            reason: "Use the draft workspace first",
+          },
+        } as UIMessage["parts"][number];
+      },
+    );
+    const rejectionResponse = await postChatMessages({
+      conversationId: "conversation-write-reject",
+      messageId: pendingAssistant!.id,
+      messages: rejectedMessages,
+    });
+
+    expect(rejectionResponse.status).toBe(200);
+    await rejectionResponse.text();
+
+    expect(fakeMcp.toolCalls).toEqual([]);
+    expect(JSON.stringify(fakeModel.chatRequests[1])).toContain(
+      "Use the draft workspace first",
+    );
+    expect(
+      (await latestAssistantMessage("conversation-write-reject"))?.content,
+    ).toBe("I will adjust the write.");
+  });
+
+  it("executes write tools without pausing when auto-approve writes is enabled", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({
+      chatResponses: [
+        createToolCallResponse({
+          toolCallId: "call-write-auto",
+          toolName: "WriteTable",
+          argumentsJson: JSON.stringify({
+            table: "tt_content",
+            data: { header: "Auto-approved headline" },
+          }),
+        }),
+        createTextResponse({ text: "Auto-approved write completed." }),
+      ],
+      models: [{ id: "fake-typo3-model", context_length: 4096 }],
+    });
+    await seedTokenModeConversation({
+      conversationId: "conversation-write-auto",
+      fakeMcpUrl: fakeMcp.url,
+      fakeModelUrl: fakeModel.url,
+      title: "Auto work",
+      autoApproveWrites: true,
+    });
+
+    const response = await postChat({
+      conversationId: "conversation-write-auto",
+      text: "Create a content element",
+    });
+
+    expect(response.status).toBe(200);
+    await response.text();
+
+    const assistant = await latestAssistantMessage("conversation-write-auto");
+    expect(fakeMcp.toolCalls).toEqual([
+      {
+        name: "WriteTable",
+        arguments: {
+          table: "tt_content",
+          data: { header: "Auto-approved headline" },
+        },
+      },
+    ]);
+    expect(assistant?.content).toBe("Auto-approved write completed.");
+    expect(assistant?.tool_calls).not.toContain("approval-requested");
+  });
+
   it("streams a tool-call response through a selected custom provider", async () => {
     fakeMcp = await startFakeMcpServer();
     fakeModel = await startFakeOpenAICompatibleServer({
@@ -489,10 +716,12 @@ async function seedTokenModeConversation({
   fakeModelUrl,
   customProvider,
   title = "New conversation",
+  autoApproveWrites = false,
 }: {
   conversationId: string;
   fakeMcpUrl: string;
   fakeModelUrl: string;
+  autoApproveWrites?: boolean;
   customProvider?: {
     apiKey: string;
     displayName: string;
@@ -514,6 +743,7 @@ async function seedTokenModeConversation({
     id: conversationId,
     user_id: LOCAL_USER_ID,
     title,
+    auto_approve_writes: autoApproveWrites ? 1 : 0,
   });
   await db.insert(userSettings).values({
     user_id: LOCAL_USER_ID,
@@ -533,6 +763,46 @@ async function seedTokenModeConversation({
         ])
       : null,
   });
+}
+
+async function persistedUiMessages(
+  conversationId: string,
+  updatePart?: (part: UIMessage["parts"][number]) => UIMessage["parts"][number],
+): Promise<UIMessage[]> {
+  const rows = await db.query.messages.findMany({
+    where: eq(messages.conversation_id, conversationId),
+    orderBy: [asc(messages.created_at)],
+  });
+
+  return rows.map((message) => ({
+    id: message.id,
+    role: message.role as UIMessage["role"],
+    parts: (deserializeMessageParts(message.tool_calls) ?? [
+      { type: "text", text: message.content },
+    ]).map((part) => (updatePart ? updatePart(part) : part)),
+  }));
+}
+
+async function postChatMessages({
+  conversationId,
+  messageId,
+  messages: uiMessages,
+}: {
+  conversationId: string;
+  messageId?: string;
+  messages: UIMessage[];
+}) {
+  return POST(
+    new Request("http://localhost/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        conversationId,
+        messageId,
+        messages: uiMessages,
+      }),
+    }) as never,
+  );
 }
 
 async function postChat({

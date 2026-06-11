@@ -113,7 +113,7 @@ function buildBackendRecordUrl(output: unknown): string | null {
   return url.toString();
 }
 
-function classifyTool(name: string): "read" | "write" | "unknown" {
+export function classifyMcpTool(name: string): "read" | "write" | "unknown" {
   if (/write|create|update|delete|translate/i.test(name)) {
     return "write";
   }
@@ -285,11 +285,14 @@ async function initializeMcp(accessToken: string): Promise<string | null> {
 export async function getMcpTools({
   sessionId,
   accessToken,
+  requireWriteApproval = true,
 }: {
   sessionId: string;
   accessToken: string;
+  requireWriteApproval?: boolean;
 }): Promise<ToolSet> {
-  const cached = toolCache.get(sessionId);
+  const toolCacheKey = `${sessionId}:write-approval:${requireWriteApproval ? "manual" : "auto"}`;
+  const cached = toolCache.get(toolCacheKey);
   const now = Date.now();
 
   if (cached && now - cached.fetchedAt < TOOL_CACHE_TTL_MS) {
@@ -321,6 +324,8 @@ export async function getMcpTools({
       mcpTool.name,
       tool({
         description: mcpTool.description || `TYPO3 MCP tool: ${mcpTool.name}`,
+        needsApproval:
+          requireWriteApproval && classifyMcpTool(mcpTool.name) === "write",
         inputSchema: jsonSchema(
           (mcpTool.inputSchema as Record<string, unknown>) || {
             type: "object",
@@ -338,7 +343,7 @@ export async function getMcpTools({
             sessionHeaderId: mcpSessionCache.get(sessionId) ?? activeMcpSessionId,
           });
 
-          const operation = classifyTool(mcpTool.name);
+          const operation = classifyMcpTool(mcpTool.name);
           const backendRecordUrl =
             operation === "write" ? buildBackendRecordUrl(result.result) : null;
 
@@ -347,6 +352,10 @@ export async function getMcpTools({
             _meta: {
               operation,
               backendRecordUrl,
+              approval:
+                operation === "write" && !requireWriteApproval
+                  ? "auto-approved"
+                  : undefined,
             },
           };
         },
@@ -354,6 +363,27 @@ export async function getMcpTools({
     ]),
   );
 
-  toolCache.set(sessionId, { fetchedAt: now, tools });
+  toolCache.set(toolCacheKey, { fetchedAt: now, tools });
   return tools;
+}
+
+export async function listMcpToolNamesByOperation({
+  accessToken,
+}: {
+  accessToken: string;
+}): Promise<Record<"read" | "write" | "unknown", string[]>> {
+  const mcpSessionId = await initializeMcp(accessToken);
+  const listResponse = await callMcpMethod<McpToolListResult>({
+    accessToken,
+    method: "tools/list",
+    sessionHeaderId: mcpSessionId,
+  });
+
+  return listResponse.result.tools.reduce<Record<"read" | "write" | "unknown", string[]>>(
+    (toolNames, mcpTool) => {
+      toolNames[classifyMcpTool(mcpTool.name)].push(mcpTool.name);
+      return toolNames;
+    },
+    { read: [], write: [], unknown: [] },
+  );
 }

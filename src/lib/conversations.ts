@@ -113,6 +113,34 @@ export async function renameConversationForUser(
   return updated ?? null;
 }
 
+export async function updateConversationForUser(
+  userId: string,
+  conversationId: string,
+  input: {
+    autoApproveWrites?: boolean;
+    title?: string;
+  },
+): Promise<Conversation | null> {
+  const conversation = await getConversationForUser(userId, conversationId);
+  if (!conversation) {
+    return null;
+  }
+
+  const [updated] = await db
+    .update(conversations)
+    .set({
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.autoApproveWrites !== undefined
+        ? { auto_approve_writes: input.autoApproveWrites ? 1 : 0 }
+        : {}),
+      updated_at: Math.floor(Date.now() / 1000),
+    })
+    .where(eq(conversations.id, conversationId))
+    .returning();
+
+  return updated ?? null;
+}
+
 export async function deleteConversationForUser(
   userId: string,
   conversationId: string,

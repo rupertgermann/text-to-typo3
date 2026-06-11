@@ -3,7 +3,7 @@ import { getAuthenticatedUser } from "@/lib/auth";
 import {
   deleteConversationForUser,
   getConversationWithMessagesForUser,
-  renameConversationForUser,
+  updateConversationForUser,
 } from "@/lib/conversations";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -42,22 +42,40 @@ export async function PATCH(
 
   const { id } = await params;
 
-  let body: { title?: unknown };
+  let body: { autoApproveWrites?: unknown; title?: unknown };
   try {
     body = await request.json();
   } catch {
     return Response.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  if (typeof body.title !== "string" || !body.title.trim()) {
+  const hasTitle = body.title !== undefined;
+  const hasAutoApproveWrites = body.autoApproveWrites !== undefined;
+
+  if (!hasTitle && !hasAutoApproveWrites) {
+    return Response.json(
+      { error: "title or autoApproveWrites is required" },
+      { status: 400 },
+    );
+  }
+
+  if (hasTitle && (typeof body.title !== "string" || !body.title.trim())) {
     return Response.json({ error: "title is required" }, { status: 400 });
   }
 
-  const updated = await renameConversationForUser(
-    auth.user.id,
-    id,
-    body.title.trim(),
-  );
+  if (hasAutoApproveWrites && typeof body.autoApproveWrites !== "boolean") {
+    return Response.json(
+      { error: "autoApproveWrites must be a boolean" },
+      { status: 400 },
+    );
+  }
+
+  const updated = await updateConversationForUser(auth.user.id, id, {
+    ...(hasTitle ? { title: (body.title as string).trim() } : {}),
+    ...(hasAutoApproveWrites
+      ? { autoApproveWrites: body.autoApproveWrites as boolean }
+      : {}),
+  });
 
   if (!updated) {
     return Response.json({ error: "Conversation not found" }, { status: 404 });

@@ -38,6 +38,7 @@ export const conversations = sqliteTable("conversations", {
     .notNull()
     .references(() => users.id),
   title: text("title").notNull(),
+  auto_approve_writes: integer("auto_approve_writes"),
   created_at: integer("created_at")
     .notNull()
     .default(sql`(unixepoch())`),
