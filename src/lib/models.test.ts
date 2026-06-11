@@ -26,15 +26,18 @@ describe("model context window labels", () => {
 });
 
 describe("OpenAI model catalog filtering", () => {
-  it("keeps current and future chat models while excluding non-chat families", async () => {
+  it("keeps only the curated latest OpenAI models from the API catalog", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
         Response.json({
           data: [
+            { id: "gpt-5.5" },
+            { id: "gpt-5.4" },
             { id: "text-embedding-3-large" },
             { id: "gpt-5.4-mini" },
             { id: "gpt-6-alpha" },
+            { id: "gpt-4o" },
             { id: "gpt-image-1" },
             { id: "omni-moderation-latest" },
             { id: "gpt-4o-realtime-preview" },
@@ -49,14 +52,15 @@ describe("OpenAI model catalog filtering", () => {
     const models = await listOpenAIModels("test-key");
 
     expect(models.map((model) => model.id)).toEqual([
+      "gpt-5.5",
+      "gpt-5.4",
       "gpt-5.4-mini",
-      "gpt-6-alpha",
-      "o4-mini",
     ]);
     expect(models[0]).toMatchObject({
-      name: "gpt 5.4 mini",
+      name: "GPT-5.5",
       provider: "openai",
       contextWindow: 400000,
+      description: "A new class of intelligence for coding and professional work.",
     });
   });
 });

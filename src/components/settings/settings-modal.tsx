@@ -84,7 +84,10 @@ function ModelCard({
     <button
       type="button"
       onClick={() => onSelect(model)}
-      title={model.contextWindow ? `${model.name} • ${model.contextWindow.toLocaleString()} tokens` : model.name}
+      title={
+        model.description ??
+        (model.contextWindow ? `${model.name} • ${model.contextWindow.toLocaleString()} tokens` : model.name)
+      }
       className={cn(
         "flex w-full items-start justify-between gap-3 rounded-xl border px-3 py-2 text-left transition-colors",
         selected
@@ -114,10 +117,18 @@ function ModelCard({
           ) : null}
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
-          {model.contextWindow
-            ? `${model.contextWindow.toLocaleString()} token context`
-            : "Context window unknown"}
+          {model.description ??
+            (model.contextWindow
+              ? `${model.contextWindow.toLocaleString()} token context`
+              : "Context window unknown")}
         </p>
+        {model.description ? (
+          <p className="mt-0.5 text-[11px] text-muted-foreground/80">
+            {model.contextWindow
+              ? `${model.contextWindow.toLocaleString()} token context`
+              : "Context window unknown"}
+          </p>
+        ) : null}
       </div>
       {selected ? <Check className="mt-0.5 h-4 w-4" /> : null}
     </button>

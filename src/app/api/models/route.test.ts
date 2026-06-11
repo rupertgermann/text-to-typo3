@@ -44,7 +44,10 @@ describe("models route", () => {
           });
           return Response.json({
             data: [
+              { id: "gpt-5.5" },
+              { id: "gpt-5.4" },
               { id: "gpt-5.4-mini" },
+              { id: "gpt-4o" },
               { id: "text-embedding-3-small" },
             ],
           });
@@ -64,7 +67,9 @@ describe("models route", () => {
     const catalog = await response.json();
 
     expect(catalog.models.map((model: { id: string }) => model.id).sort()).toEqual([
+      "gpt-5.4",
       "gpt-5.4-mini",
+      "gpt-5.5",
       "local-chat",
     ]);
     expect(catalog.hasOpenAIKey).toBe(true);

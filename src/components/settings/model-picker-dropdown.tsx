@@ -213,8 +213,13 @@ export function ModelPickerDropdown({
                       </Badge>
                     </span>
                     <span className="mt-1 block text-xs text-muted-foreground">
-                      {getModelContextWindowLabel(model.contextWindow)}
+                      {model.description ?? getModelContextWindowLabel(model.contextWindow)}
                     </span>
+                    {model.description ? (
+                      <span className="mt-0.5 block text-[11px] text-muted-foreground/80">
+                        {getModelContextWindowLabel(model.contextWindow)}
+                      </span>
+                    ) : null}
                   </span>
 
                   <ModelContextChip model={model} />

@@ -36,34 +36,30 @@ export interface UserModelCatalog {
   customProviders: PublicCustomProvider[];
 }
 
+const LATEST_OPENAI_MODELS: Array<{
+  id: string;
+  name: string;
+  description: string;
+}> = [
+  {
+    id: "gpt-5.5",
+    name: "GPT-5.5",
+    description: "A new class of intelligence for coding and professional work.",
+  },
+  {
+    id: "gpt-5.4",
+    name: "GPT-5.4",
+    description: "A more affordable model for coding and professional work.",
+  },
+  {
+    id: "gpt-5.4-mini",
+    name: "GPT-5.4 mini",
+    description: "Our strongest mini model yet for coding, computer use, and subagents",
+  },
+];
+
 function normalizeModelId(id: string): string {
   return id.trim();
-}
-
-function isOpenAIChatModelId(id: string): boolean {
-  const normalized = id.trim().toLowerCase();
-
-  if (!normalized) {
-    return false;
-  }
-
-  const excludedFamilies = [
-    "audio",
-    "dall-e",
-    "embedding",
-    "image",
-    "moderation",
-    "realtime",
-    "speech",
-    "tts",
-    "whisper",
-  ];
-
-  if (excludedFamilies.some((family) => normalized.includes(family))) {
-    return false;
-  }
-
-  return /^(?:gpt|chatgpt|o\d)/.test(normalized);
 }
 
 export function getModelContextWindowHint(id: string): number | null {
@@ -135,20 +131,25 @@ export async function listOpenAIModels(
       ? json.data
       : [];
 
-    return rawModels
-      .map((entry) => entry.id?.trim())
-      .filter((id): id is string => typeof id === "string" && id.length > 0)
-      .filter((id) => isOpenAIChatModelId(id))
-      .map((id) => ({
-        id: normalizeModelId(id),
-        name: buildDisplayName(id),
+    const availableModelIds = new Set(
+      rawModels
+        .map((entry) => entry.id?.trim())
+        .filter((id): id is string => typeof id === "string" && id.length > 0)
+        .map((id) => normalizeModelId(id).toLowerCase()),
+    );
+
+    return LATEST_OPENAI_MODELS
+      .filter((model) => availableModelIds.has(model.id))
+      .map((model) => ({
+        id: model.id,
+        name: model.name,
         provider: "openai" as const,
         providerId: "openai",
         providerName: "OpenAI",
-        remoteModelId: id,
-        contextWindow: getModelContextWindowHint(id),
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
+        remoteModelId: model.id,
+        contextWindow: getModelContextWindowHint(model.id),
+        description: model.description,
+      }));
   } catch {
     return [];
   }
