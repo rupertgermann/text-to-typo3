@@ -38,8 +38,6 @@ import { budgetModelMessages } from "@/lib/context-budget";
 import {
   DEFAULT_CHAT_MODEL_ID,
   getModelContextWindowHint,
-  listCustomProviderModels,
-  listLmStudioModels,
 } from "@/lib/models";
 import { normalizeLanguageModelUsage } from "@/lib/token-usage";
 import { getChatErrorMessage } from "@/lib/chat-errors";
@@ -409,18 +407,9 @@ export async function POST(request: NextRequest) {
     configuredModelId === userSettings.lmstudioModelId;
   const modelId =
     selectedCustomProvider?.remoteModelId ?? configuredModelId;
-  const selectedModelContextWindow = selectedCustomProvider
-    ? (await listCustomProviderModels([selectedCustomProvider.provider])).find(
-        (model) => model.id === configuredModelId,
-      )?.contextWindow
-    : useLmStudio && userSettings.lmstudioBaseUrl
-    ? (await listLmStudioModels(userSettings.lmstudioBaseUrl)).find(
-        (model) => model.id === modelId,
-      )?.contextWindow
-    : null;
   const budgetedModelMessages = budgetModelMessages(modelMessages, {
     contextWindow:
-      selectedModelContextWindow ?? getModelContextWindowHint(modelId),
+      userSettings.modelContextWindow ?? getModelContextWindowHint(modelId),
     reservedOutputTokens: 4096,
   });
   const openAiApiKey =

@@ -189,6 +189,7 @@ describe("chat route integration", () => {
       conversationId: "conversation-budget",
       fakeMcpUrl: fakeMcp.url,
       fakeModelUrl: fakeModel.url,
+      modelContextWindow: 300,
     });
     const hugeToolOutput = "very-large-tool-output ".repeat(1000);
     await db.insert(messages).values({
@@ -232,6 +233,7 @@ describe("chat route integration", () => {
 
     expect(requestPayload).toContain("Newest question should stay");
     expect(requestPayload).not.toContain("very-large-tool-output");
+    expect(fakeModel.modelsRequests).toHaveLength(0);
     expect(persistedHugeMessage?.tool_calls).toContain("very-large-tool-output");
   });
 

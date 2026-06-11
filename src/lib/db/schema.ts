@@ -70,6 +70,7 @@ export const userSettings = sqliteTable("user_settings", {
     .primaryKey()
     .references(() => users.id),
   model_id: text("model_id"),
+  model_context_window: integer("model_context_window"),
   openai_api_key: text("openai_api_key"),
   lmstudio_base_url: text("lmstudio_base_url"),
   lmstudio_model_id: text("lmstudio_model_id"),

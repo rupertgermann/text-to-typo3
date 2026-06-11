@@ -6,9 +6,12 @@ import {
   upsertUserSettings,
   UserSettingsValidationError,
 } from "@/lib/user-settings";
+import { listAvailableModelsForUser } from "@/lib/model-service";
+import { getOpenAIModelContextWindowHint } from "@/lib/models";
 
 type SettingsBody = {
   modelId?: unknown;
+  modelContextWindow?: unknown;
   openaiApiKey?: unknown;
   lmstudioBaseUrl?: unknown;
   lmstudioModelId?: unknown;
@@ -29,6 +32,22 @@ function asNullableString(value: unknown): string | null | undefined {
   }
 
   return value;
+}
+
+function asNullablePositiveInteger(value: unknown): number | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value !== "number") {
+    return undefined;
+  }
+
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 function asCustomProviders(
@@ -88,11 +107,36 @@ export async function PATCH(request: NextRequest) {
   try {
     updated = await upsertUserSettings(auth.user.id, {
       modelId: asNullableString(body.modelId),
+      modelContextWindow: asNullablePositiveInteger(body.modelContextWindow),
       openaiApiKey: asNullableString(body.openaiApiKey),
       lmstudioBaseUrl: asNullableString(body.lmstudioBaseUrl),
       lmstudioModelId: asNullableString(body.lmstudioModelId),
       customProviders: asCustomProviders(body.customProviders),
     });
+    const selectedModelId = updated.modelId;
+    if (
+      selectedModelId &&
+      (body.modelId !== undefined ||
+        body.lmstudioBaseUrl !== undefined ||
+        body.lmstudioModelId !== undefined ||
+        body.customProviders !== undefined)
+    ) {
+      const staticHint = getOpenAIModelContextWindowHint(selectedModelId);
+      const modelContextWindow =
+        staticHint ??
+        (await listAvailableModelsForUser(auth.user.id)).models.find(
+          (model) => model.id === selectedModelId,
+        )?.contextWindow ??
+        null;
+
+      updated = await upsertUserSettings(auth.user.id, {
+        modelContextWindow,
+      });
+    } else if (!selectedModelId && body.modelId !== undefined) {
+      updated = await upsertUserSettings(auth.user.id, {
+        modelContextWindow: null,
+      });
+    }
   } catch (error) {
     if (error instanceof UserSettingsValidationError) {
       return Response.json({ error: error.message }, { status: 400 });

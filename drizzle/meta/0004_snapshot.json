@@ -261,6 +261,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "model_context_window": {
+          "name": "model_context_window",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "openai_api_key": {
           "name": "openai_api_key",
           "type": "text",

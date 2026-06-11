@@ -110,6 +110,13 @@ export function getModelContextWindowHint(id: string): number | null {
   return null;
 }
 
+export function getOpenAIModelContextWindowHint(id: string): number | null {
+  const normalized = normalizeModelId(id);
+  return LATEST_OPENAI_MODELS.some((model) => model.id === normalized)
+    ? getModelContextWindowHint(normalized)
+    : null;
+}
+
 function buildDisplayName(id: string): string {
   return id.replaceAll("-", " ");
 }

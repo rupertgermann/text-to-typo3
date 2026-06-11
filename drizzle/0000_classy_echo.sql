@@ -30,6 +30,7 @@ CREATE TABLE `sessions` (
 CREATE TABLE `user_settings` (
 	`user_id` text PRIMARY KEY NOT NULL,
 	`model_id` text,
+	`model_context_window` integer,
 	`openai_api_key` text,
 	`lmstudio_base_url` text,
 	`lmstudio_model_id` text,

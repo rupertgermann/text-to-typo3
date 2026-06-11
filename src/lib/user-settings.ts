@@ -6,6 +6,7 @@ import { getEnv } from "@/lib/env";
 
 export interface UserSettingsInput {
   modelId?: string | null;
+  modelContextWindow?: number | null;
   openaiApiKey?: string | null;
   lmstudioBaseUrl?: string | null;
   lmstudioModelId?: string | null;
@@ -36,6 +37,7 @@ export interface ResolvedCustomProvider {
 export interface PublicUserSettings {
   userId: string;
   modelId: string | null;
+  modelContextWindow: number | null;
   hasOpenAIKey: boolean;
   lmstudioBaseUrl: string | null;
   lmstudioModelId: string | null;
@@ -45,6 +47,7 @@ export interface PublicUserSettings {
 export interface ResolvedUserSettings {
   userId: string;
   modelId: string | null;
+  modelContextWindow: number | null;
   openAiApiKey: string | null;
   lmstudioBaseUrl: string | null;
   lmstudioModelId: string | null;
@@ -76,6 +79,14 @@ function normalizeNullableString(value: string | null | undefined): string | nul
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeContextWindow(value: number | null | undefined): number | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 function normalizeBaseUrl(value: string | null | undefined): string | null | undefined {
@@ -257,6 +268,7 @@ export async function getPublicUserSettings(
   return {
     userId,
     modelId: settings?.model_id ?? null,
+    modelContextWindow: settings?.model_context_window ?? null,
     hasOpenAIKey: Boolean(settings?.openai_api_key),
     lmstudioBaseUrl: settings?.lmstudio_base_url ?? null,
     lmstudioModelId: settings?.lmstudio_model_id ?? null,
@@ -274,6 +286,7 @@ export async function getResolvedUserSettings(
   return {
     userId,
     modelId: settings?.model_id ?? null,
+    modelContextWindow: settings?.model_context_window ?? null,
     openAiApiKey: settings?.openai_api_key
       ? decrypt(settings.openai_api_key)
       : env.OPENAI_API_KEY || null,
@@ -297,6 +310,10 @@ export async function upsertUserSettings(
     input.modelId === undefined
       ? existing?.model_id ?? null
       : normalizeNullableString(input.modelId);
+  const nextModelContextWindow =
+    input.modelContextWindow === undefined
+      ? existing?.model_context_window ?? null
+      : normalizeContextWindow(input.modelContextWindow);
   const nextLmStudioBaseUrl =
     input.lmstudioBaseUrl === undefined
       ? existing?.lmstudio_base_url ?? null
@@ -319,6 +336,7 @@ export async function upsertUserSettings(
   const nextRow = {
     user_id: userId,
     model_id: nextModelId,
+    model_context_window: nextModelContextWindow,
     openai_api_key: nextOpenAiApiKey,
     lmstudio_base_url: nextLmStudioBaseUrl,
     lmstudio_model_id: nextLmStudioModelId,
@@ -332,6 +350,7 @@ export async function upsertUserSettings(
       target: userSettings.user_id,
       set: {
         model_id: nextRow.model_id,
+        model_context_window: nextRow.model_context_window,
         openai_api_key: nextRow.openai_api_key,
         lmstudio_base_url: nextRow.lmstudio_base_url,
         lmstudio_model_id: nextRow.lmstudio_model_id,
@@ -342,6 +361,7 @@ export async function upsertUserSettings(
   return {
     userId,
     modelId: nextModelId,
+    modelContextWindow: nextModelContextWindow,
     hasOpenAIKey: Boolean(nextOpenAiApiKey),
     lmstudioBaseUrl: nextLmStudioBaseUrl ?? null,
     lmstudioModelId: nextLmStudioModelId,
