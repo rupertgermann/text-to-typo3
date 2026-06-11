@@ -289,7 +289,7 @@ export function getModelContextWindowLabel(
     return "Context window unknown";
   }
 
-  return `Context window ${contextWindow.toLocaleString()} tokens`;
+  return `Context window ${contextWindow.toLocaleString("en-US")} tokens`;
 }
 
 export function getModelContextWindowShortLabel(
