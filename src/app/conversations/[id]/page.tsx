@@ -1,8 +1,5 @@
 import { redirect } from "next/navigation";
-import { eq, and, asc } from "drizzle-orm";
 import { getAuthenticatedUser } from "@/lib/auth";
-import { db } from "@/lib/db";
-import { conversations, messages } from "@/lib/db/schema";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ChatInterface } from "@/components/chat/ChatInterface";
@@ -12,7 +9,10 @@ import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { getEnv } from "@/lib/env";
 import { getSelectedModelSummary } from "@/lib/models";
 import { formatTokenUsage } from "@/lib/token-usage";
-import { getAssistantTokenUsage } from "@/lib/conversations";
+import {
+  getAssistantTokenUsage,
+  getConversationWithMessagesForUser,
+} from "@/lib/conversations";
 import { getPublicUserSettings } from "@/lib/user-settings";
 
 interface ConversationPageProps {
@@ -30,21 +30,12 @@ export default async function ConversationPage({
     redirect("/api/auth/login");
   }
 
-  const conversation = await db.query.conversations.findFirst({
-    where: and(
-      eq(conversations.id, id),
-      eq(conversations.user_id, user.id),
-    ),
-  });
+  const conversation = await getConversationWithMessagesForUser(user.id, id);
 
   if (!conversation) {
     redirect("/");
   }
 
-  const initialMessages = await db.query.messages.findMany({
-    where: eq(messages.conversation_id, id),
-    orderBy: [asc(messages.created_at)],
-  });
   const conversationUsage = await getAssistantTokenUsage(id);
 
   const initials = user.display_name
@@ -116,7 +107,7 @@ export default async function ConversationPage({
         <ChatInterface
           conversationId={id}
           initialAutoApproveWrites={Boolean(conversation.auto_approve_writes)}
-          initialMessages={initialMessages}
+          initialMessages={conversation.messages}
         />
         </div>
     </div>
