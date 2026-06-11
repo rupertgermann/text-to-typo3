@@ -23,6 +23,7 @@ import {
   getModelContextWindowLabel,
   getModelContextWindowShortLabel,
   type AvailableModel,
+  type ProviderCatalog,
   type UserModelCatalog,
 } from "@/lib/models";
 import type { PublicCustomProvider, PublicUserSettings } from "@/lib/user-settings";
@@ -69,6 +70,34 @@ function ConnectionResult({ status }: { status: ConnectionStatus | null }) {
       <span>{status.message}</span>
     </div>
   );
+}
+
+function ProviderStatusLine({
+  isLoading,
+  provider,
+}: {
+  isLoading: boolean;
+  provider?: ProviderCatalog;
+}) {
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        <span>Loading models</span>
+      </div>
+    );
+  }
+
+  if (provider?.status === "unavailable") {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-destructive">
+        <AlertCircle className="h-3.5 w-3.5" />
+        <span>Unavailable</span>
+      </div>
+    );
+  }
+
+  return null;
 }
 
 function ModelCard({
@@ -140,11 +169,13 @@ export function SettingsModal({
   typo3BaseUrl,
 }: SettingsModalProps) {
   const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [settings, setSettings] = useState<PublicUserSettings | null>(null);
   const [models, setModels] = useState<AvailableModel[]>([]);
+  const [providerCatalogs, setProviderCatalogs] = useState<ProviderCatalog[]>([]);
   const [openaiKey, setOpenaiKey] = useState("");
   const [lmstudioBaseUrl, setLmstudioBaseUrl] = useState("");
   const [customProviders, setCustomProviders] = useState<EditableCustomProvider[]>([]);
@@ -172,6 +203,21 @@ export function SettingsModal({
     () => models.filter((model) => model.provider === "custom"),
     [models],
   );
+  const openAiProvider = providerCatalogs.find(
+    (provider) => provider.providerId === "openai",
+  );
+  const lmStudioProvider = providerCatalogs.find(
+    (provider) => provider.providerId === "lmstudio",
+  );
+  const customProviderById = useMemo(
+    () =>
+      new Map(
+        providerCatalogs
+          .filter((provider) => provider.provider === "custom")
+          .map((provider) => [provider.providerId, provider]),
+      ),
+    [providerCatalogs],
+  );
 
   useEffect(() => {
     if (!open) {
@@ -181,29 +227,26 @@ export function SettingsModal({
     let cancelled = false;
     const controller = new AbortController();
 
-    async function load() {
-      setLoading(true);
+    async function loadSettings() {
+      setSettingsLoading(true);
       setError(null);
 
       try {
-        const [settingsResponse, modelsResponse] = await Promise.all([
-          fetch("/api/settings", { signal: controller.signal }),
-          fetch("/api/models", { signal: controller.signal }),
-        ]);
+        const settingsResponse = await fetch("/api/settings", {
+          signal: controller.signal,
+        });
 
-        if (!settingsResponse.ok || !modelsResponse.ok) {
+        if (!settingsResponse.ok) {
           throw new Error("Failed to load settings");
         }
 
         const settingsData: PublicUserSettings = await settingsResponse.json();
-        const catalog: RemoteModelCatalog = await modelsResponse.json();
 
         if (cancelled) {
           return;
         }
 
         setSettings(settingsData);
-        setModels(catalog.models);
         setLmstudioBaseUrl(settingsData.lmstudioBaseUrl ?? "");
         setCustomProviders(
           settingsData.customProviders.map((provider) => ({
@@ -219,11 +262,42 @@ export function SettingsModal({
         }
         setError("Failed to load settings");
       } finally {
-        setLoading(false);
+        setSettingsLoading(false);
       }
     }
 
-    void load();
+    async function loadModels() {
+      setModelsLoading(true);
+
+      try {
+        const modelsResponse = await fetch("/api/models", {
+          signal: controller.signal,
+        });
+
+        if (!modelsResponse.ok) {
+          throw new Error("Failed to fetch models");
+        }
+
+        const catalog: RemoteModelCatalog = await modelsResponse.json();
+
+        if (cancelled) {
+          return;
+        }
+
+        setModels(catalog.models);
+        setProviderCatalogs(catalog.providers);
+      } catch (loadError) {
+        if (loadError instanceof Error && loadError.name === "AbortError") {
+          return;
+        }
+        setError("Failed to fetch models");
+      } finally {
+        setModelsLoading(false);
+      }
+    }
+
+    void loadSettings();
+    void loadModels();
 
     return () => {
       cancelled = true;
@@ -232,6 +306,7 @@ export function SettingsModal({
   }, [open]);
 
   async function refreshModels(nextLmStudioBaseUrl?: string) {
+    setModelsLoading(true);
     try {
       const response = await fetch(
         nextLmStudioBaseUrl
@@ -245,12 +320,15 @@ export function SettingsModal({
 
       const catalog: RemoteModelCatalog = await response.json();
       setModels(catalog.models);
+      setProviderCatalogs(catalog.providers);
     } catch (refreshError) {
       setError(
         refreshError instanceof Error
           ? refreshError.message
           : "Failed to fetch models",
       );
+    } finally {
+      setModelsLoading(false);
     }
   }
 
@@ -449,20 +527,27 @@ export function SettingsModal({
           </DialogDescription>
         </DialogHeader>
 
-        {loading ? (
-          <div className="flex items-center gap-2 rounded-xl border px-3 py-4 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Loading settings...
-          </div>
-        ) : (
-          <ScrollArea className="max-h-[70vh] pr-2">
+        <ScrollArea className="max-h-[70vh] pr-2">
             <div className="space-y-6 pb-2">
+              {settingsLoading ? (
+                <div className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading saved settings...
+                </div>
+              ) : null}
+
               <section className="space-y-3 rounded-xl border p-4">
-                <div className="flex items-center gap-2">
-                  <Badge variant="secondary">AI Model</Badge>
-                  <span className="text-sm text-muted-foreground">
-                    Select the model used for responses.
-                  </span>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="secondary">AI Model</Badge>
+                    <span className="text-sm text-muted-foreground">
+                      Select the model used for responses.
+                    </span>
+                  </div>
+                  <ProviderStatusLine
+                    isLoading={modelsLoading}
+                    provider={openAiProvider}
+                  />
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium">OpenAI API Key</label>
@@ -495,7 +580,9 @@ export function SettingsModal({
                 <div className="grid gap-2 md:grid-cols-2">
                   {openAiModels.length === 0 ? (
                     <div className="rounded-xl border border-dashed p-3 text-sm text-muted-foreground">
-                      No OpenAI models available yet.
+                      {modelsLoading
+                        ? "OpenAI models loading."
+                        : "No OpenAI models available yet."}
                     </div>
                   ) : (
                     openAiModels.map((model) => (
@@ -598,6 +685,10 @@ export function SettingsModal({
                               </Button>
                             </div>
                           </div>
+                          <ProviderStatusLine
+                            isLoading={modelsLoading}
+                            provider={customProviderById.get(provider.id)}
+                          />
                           <ConnectionResult
                             status={customProviderConnections[provider.id] ?? null}
                           />
@@ -610,7 +701,9 @@ export function SettingsModal({
                 <div className="grid gap-2 md:grid-cols-2">
                   {customModels.length === 0 ? (
                     <div className="rounded-xl border border-dashed p-3 text-sm text-muted-foreground">
-                      No custom endpoint models loaded.
+                      {modelsLoading
+                        ? "Custom endpoint models loading."
+                        : "No custom endpoint models loaded."}
                     </div>
                   ) : (
                     customModels.map((model) => (
@@ -628,11 +721,17 @@ export function SettingsModal({
               </section>
 
               <section className="space-y-3 rounded-xl border p-4">
-                <div className="flex items-center gap-2">
-                  <Badge variant="secondary">LM Studio</Badge>
-                  <span className="text-sm text-muted-foreground">
-                    Point the app at a local OpenAI-compatible endpoint.
-                  </span>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="secondary">LM Studio</Badge>
+                    <span className="text-sm text-muted-foreground">
+                      Point the app at a local OpenAI-compatible endpoint.
+                    </span>
+                  </div>
+                  <ProviderStatusLine
+                    isLoading={modelsLoading && Boolean(lmstudioBaseUrl.trim())}
+                    provider={lmStudioProvider}
+                  />
                 </div>
                 <div className="flex gap-2">
                   <Input
@@ -666,7 +765,9 @@ export function SettingsModal({
                 <div className="grid gap-2 md:grid-cols-2">
                   {lmStudioModels.length === 0 ? (
                     <div className="rounded-xl border border-dashed p-3 text-sm text-muted-foreground">
-                      No LM Studio models loaded.
+                      {modelsLoading && lmstudioBaseUrl.trim()
+                        ? "LM Studio models loading."
+                        : "No LM Studio models loaded."}
                     </div>
                   ) : (
                     lmStudioModels.map((model) => (
@@ -744,7 +845,6 @@ export function SettingsModal({
               ) : null}
             </div>
           </ScrollArea>
-        )}
 
         <DialogFooter>
           <Button
