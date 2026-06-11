@@ -5,7 +5,8 @@
   "license": "MIT",
   "description": "Chat with a TYPO3 instance through its MCP server using OpenAI or LM Studio models.",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
+    "dev:turbopack": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
