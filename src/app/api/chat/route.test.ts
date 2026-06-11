@@ -377,6 +377,53 @@ describe("chat route integration", () => {
     await expectConversationTitle("conversation-renamed", "Editorial Planning");
     expect(fakeModel.chatRequests).toHaveLength(1);
   });
+
+  it("does not persist an assistant message when the provider stream fails", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({
+      chatResponses: [],
+      chatStatus: 500,
+      models: [{ id: "fake-typo3-model", context_length: 4096 }],
+    });
+    await seedTokenModeConversation({
+      conversationId: "conversation-provider-error",
+      fakeMcpUrl: fakeMcp.url,
+      fakeModelUrl: fakeModel.url,
+    });
+
+    const response = await postChat({
+      conversationId: "conversation-provider-error",
+      text: "Trigger a provider error",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).rejects.toThrow();
+    const assistant = await latestAssistantMessage("conversation-provider-error");
+    expect(assistant).toBeNull();
+  });
+
+  it("returns sanitized MCP connection errors before streaming starts", async () => {
+    fakeMcp = await startFakeMcpServer({ statusByMethod: { "tools/list": 401 } });
+    fakeModel = await startFakeOpenAICompatibleServer({
+      chatResponses: [createTextResponse({ text: "Should not be used." })],
+      models: [{ id: "fake-typo3-model", context_length: 4096 }],
+    });
+    await seedTokenModeConversation({
+      conversationId: "conversation-mcp-error",
+      fakeMcpUrl: fakeMcp.url,
+      fakeModelUrl: fakeModel.url,
+    });
+
+    const response = await postChat({
+      conversationId: "conversation-mcp-error",
+      text: "Read the page tree",
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(502);
+    expect(body.error).toBe("TYPO3 MCP authentication failed. Check the configured token.");
+    expect(JSON.stringify(body)).not.toContain("test-mcp-token");
+  });
 });
 
 async function seedTokenModeConversation({

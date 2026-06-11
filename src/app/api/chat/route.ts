@@ -28,6 +28,7 @@ import {
 import { budgetModelMessages } from "@/lib/context-budget";
 import { getModelContextWindowHint, listLmStudioModels } from "@/lib/models";
 import { normalizeLanguageModelUsage } from "@/lib/token-usage";
+import { getChatErrorMessage } from "@/lib/chat-errors";
 
 const SYSTEM_PROMPT = `You are a helpful assistant for TYPO3 CMS. You help users manage their TYPO3 website by answering questions, providing guidance, and assisting with content management tasks. Be concise, accurate, and helpful. When discussing TYPO3-specific features, refer to the correct TYPO3 version terminology and best practices. Use TYPO3 MCP tools when you need live site data or need to modify TYPO3 content. Default writes to TYPO3 workspaces, and ask for confirmation before broad changes that affect many records.
 
@@ -77,6 +78,7 @@ async function updateGeneratedConversationTitle({
   try {
     const result = await generateText({
       model,
+      maxRetries: 0,
       system:
         "Write a concise, single-line conversation title. Return only the title.",
       prompt: [
@@ -319,26 +321,35 @@ export async function POST(request: NextRequest) {
   });
   const maxSteps = getAgentLoopMaxSteps();
 
-  const tools = !useLmStudio && supportsBuiltInMcpTool(modelId)
-    ? {
-        typo3: provider.tools.mcp({
-          serverLabel: "typo3",
-          serverUrl: getTypo3McpUrl(),
-          serverDescription:
-            "TYPO3 MCP server for reading and updating TYPO3 content and configuration.",
-          headers: auth.accessToken
-            ? { Authorization: `Bearer ${auth.accessToken}` }
-            : undefined,
-        }),
-      }
-    : await getMcpTools({
-        sessionId: auth.session.sessionId || `token:${auth.user.id}`,
-        accessToken: auth.accessToken,
-      });
+  let tools;
+  try {
+    tools = !useLmStudio && supportsBuiltInMcpTool(modelId)
+      ? {
+          typo3: provider.tools.mcp({
+            serverLabel: "typo3",
+            serverUrl: getTypo3McpUrl(),
+            serverDescription:
+              "TYPO3 MCP server for reading and updating TYPO3 content and configuration.",
+            headers: auth.accessToken
+              ? { Authorization: `Bearer ${auth.accessToken}` }
+              : undefined,
+          }),
+        }
+      : await getMcpTools({
+          sessionId: auth.session.sessionId || `token:${auth.user.id}`,
+          accessToken: auth.accessToken,
+        });
+  } catch (error) {
+    return Response.json(
+      { error: getChatErrorMessage(error, "mcp") },
+      { status: 502 },
+    );
+  }
 
   const model = useLmStudio ? provider.chat(modelId) : provider.responses(modelId);
   const result = streamText({
     model,
+    maxRetries: 0,
     system: [SYSTEM_PROMPT, env.TYPO3_MCP_SYSTEM_PROMPT].filter(Boolean).join("\n\n"),
     messages: budgetedModelMessages,
     stopWhen: stepCountIs(maxSteps),
@@ -356,7 +367,7 @@ export async function POST(request: NextRequest) {
   return result.toUIMessageStreamResponse({
     originalMessages,
     onError: (error) =>
-      error instanceof Error ? error.message : "Chat request failed",
+      getChatErrorMessage(error, "provider"),
     onFinish: async ({ responseMessage }) => {
       const assistantText = extractMessageText(responseMessage.parts);
       const tokenUsage = normalizeLanguageModelUsage(await result.totalUsage);

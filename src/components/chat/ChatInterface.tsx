@@ -16,9 +16,11 @@ import {
   Paperclip,
   PanelRight,
   Pencil,
+  RefreshCw,
   Search,
   Send,
   Square,
+  TriangleAlert,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -102,7 +104,15 @@ export function ChatInterface({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const { messages, status, error, sendMessage, regenerate, stop } = useChat({
+  const {
+    messages,
+    status,
+    error,
+    clearError,
+    sendMessage,
+    regenerate,
+    stop,
+  } = useChat({
     messages: toUIMessages(initialMessages),
     transport: new DefaultChatTransport({
       body: { conversationId },
@@ -193,6 +203,19 @@ export function ChatInterface({
     setAttachments([]);
     setComposerError(null);
     queueMicrotask(() => textareaRef.current?.focus());
+  };
+
+  const retryLastUserMessage = async () => {
+    const lastUserMessage = messages.findLast((message) => message.role === "user");
+    if (!lastUserMessage || isLoading) {
+      return;
+    }
+
+    clearError();
+    await sendMessage({
+      text: extractMessageText(lastUserMessage.parts),
+      messageId: lastUserMessage.id,
+    });
   };
 
   const selectStarterPrompt = (prompt: string) => {
@@ -310,6 +333,29 @@ export function ChatInterface({
               ))
             )}
 
+            {error ? (
+              <div className="flex justify-start">
+                <div className="max-w-[85%] rounded-2xl rounded-bl-sm border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive shadow-sm">
+                  <div className="flex items-start gap-2">
+                    <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                    <div className="space-y-2">
+                      <p>{getChatErrorDisplayMessage(error)}</p>
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => void retryLastUserMessage()}
+                        disabled={isLoading}
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        Retry
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
             {status === "submitted" && (
               <div className="flex justify-start">
                 <div className="flex items-center gap-2 rounded-2xl rounded-bl-sm border border-border/70 bg-card/80 px-4 py-2.5 text-sm text-muted-foreground shadow-sm">
@@ -322,14 +368,6 @@ export function ChatInterface({
             <div ref={messagesEndRef} />
           </div>
         </div>
-
-        {error && (
-          <div className="mx-auto w-full max-w-3xl px-4 py-2">
-            <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive">
-              {error.message || "An error occurred. Please try again."}
-            </div>
-          </div>
-        )}
 
         <div className="border-t border-border/70 bg-background/80 px-4 py-4 backdrop-blur">
           <form onSubmit={handleSubmitEvent} className="mx-auto max-w-3xl">
@@ -477,4 +515,12 @@ export function ChatInterface({
       {showActivity ? <ActivitySidebar messages={messages} /> : null}
     </div>
   );
+}
+
+function getChatErrorDisplayMessage(error: Error): string {
+  if (/MCP|TYPO3/i.test(error.message)) {
+    return error.message;
+  }
+
+  return "Model provider error. Try again or test the provider connection in Settings.";
 }

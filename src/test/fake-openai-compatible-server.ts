@@ -102,10 +102,12 @@ export function createTextResponse({
 
 export async function startFakeOpenAICompatibleServer({
   chatResponses,
+  chatStatus = 200,
   models = [],
   modelsStatus = 200,
 }: {
   chatResponses: FakeChatResponse[];
+  chatStatus?: number;
   models?: FakeModel[];
   modelsStatus?: number;
 }): Promise<FakeOpenAICompatibleServer> {
@@ -133,6 +135,13 @@ export async function startFakeOpenAICompatibleServer({
         stream?: boolean;
       };
       chatRequests.push(chatRequest);
+
+      if (chatStatus !== 200) {
+        response.writeHead(chatStatus, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { message: `HTTP ${chatStatus}` } }));
+        return;
+      }
+
       const scriptedResponse = chatResponses[chatResponseIndex++];
 
       if (!scriptedResponse) {
