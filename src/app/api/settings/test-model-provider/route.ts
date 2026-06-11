@@ -1,4 +1,4 @@
-import { getAuthenticatedUser } from "@/lib/auth";
+import { badRequest, withAuth } from "@/lib/api-route";
 import { runModelProviderConnectionTest } from "@/lib/connection-tests";
 import { getResolvedUserSettings } from "@/lib/user-settings";
 
@@ -9,17 +9,12 @@ type Body = {
   provider?: unknown;
 };
 
-export async function POST(request: Request) {
-  const auth = await getAuthenticatedUser();
-  if (!auth) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+export const POST = withAuth(async (request, auth) => {
   let body: Body;
   try {
     body = await request.json();
   } catch {
-    return Response.json({ error: "Invalid request body" }, { status: 400 });
+    return badRequest("Invalid request body");
   }
 
   const settings = await getResolvedUserSettings(auth.user.id);
@@ -63,4 +58,4 @@ export async function POST(request: Request) {
   return Response.json(
     await runModelProviderConnectionTest({ apiKey, baseUrl }),
   );
-}
+});

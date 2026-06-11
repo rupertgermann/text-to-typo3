@@ -1,5 +1,5 @@
 import { type NextRequest } from "next/server";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { notFound, withAuth } from "@/lib/api-route";
 import {
   conversationExportFilename,
   conversationToMarkdown,
@@ -10,15 +10,11 @@ import { eq, and, asc } from "drizzle-orm";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
-export async function GET(
+export const GET = withAuth<RouteContext>(async (
   _request: NextRequest,
-  { params }: RouteContext,
-) {
-  const auth = await getAuthenticatedUser();
-  if (!auth) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+  auth,
+  { params },
+) => {
   const { id } = await params;
 
   const conversation = await db.query.conversations.findFirst({
@@ -29,7 +25,7 @@ export async function GET(
   });
 
   if (!conversation) {
-    return Response.json({ error: "Conversation not found" }, { status: 404 });
+    return notFound("Conversation not found");
   }
 
   const conversationMessages = await db.query.messages.findMany({
@@ -46,4 +42,4 @@ export async function GET(
       "Content-Disposition": `attachment; filename="${filename}"`,
     },
   });
-}
+});

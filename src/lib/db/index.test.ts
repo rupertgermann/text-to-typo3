@@ -7,7 +7,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { eq } from "drizzle-orm";
 import { resetDatabaseForTests, resolveDatabasePath } from "./index";
-import { conversations, users } from "./schema";
+import { conversations, messages, userSettings, users } from "./schema";
 import { db, setupTestDatabase, type TestDatabase } from "@/test/database";
 
 describe("database factory", () => {
@@ -66,14 +66,81 @@ describe("database factory", () => {
       resetDatabaseForTests();
 
       expect(() => db.select().from(conversations).all()).not.toThrow();
+      expect(() => db.select().from(userSettings).all()).not.toThrow();
 
       const migratedSqlite = new Database(databasePath, { readonly: true });
       const columns = migratedSqlite.pragma("table_info(conversations)") as Array<{
         name: string;
       }>;
+      const userSettingsColumns = migratedSqlite.pragma("table_info(user_settings)") as Array<{
+        name: string;
+      }>;
       migratedSqlite.close();
 
       expect(columns.map((column) => column.name)).toContain("auto_approve_writes");
+      expect(userSettingsColumns.map((column) => column.name)).toContain(
+        "model_context_window",
+      );
+    } finally {
+      resetDatabaseForTests();
+
+      if (previousDatabasePath === undefined) {
+        delete process.env.DATABASE_PATH;
+      } else {
+        process.env.DATABASE_PATH = previousDatabasePath;
+      }
+
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("adds message-store indexes to an existing database with data", () => {
+    const previousDatabasePath = process.env.DATABASE_PATH;
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "text-to-typo3-indexes-"));
+    const databasePath = path.join(tempDir, "app.sqlite");
+    const oldMigrationsDir = path.join(tempDir, "drizzle-0003");
+
+    try {
+      createMigrationSubset(path.join(process.cwd(), "drizzle"), oldMigrationsDir, 3);
+
+      const sqlite = new Database(databasePath);
+      migrate(drizzle(sqlite), { migrationsFolder: oldMigrationsDir });
+      sqlite.exec(`
+        insert into users (id, typo3_uid, display_name) values ('user-1', 'user-1', 'User 1');
+        insert into conversations (id, user_id, title) values ('conversation-1', 'user-1', 'Conversation 1');
+        insert into sessions (id, user_id, access_token) values ('session-1', 'user-1', 'token');
+        insert into messages (id, conversation_id, role, content, input_tokens, output_tokens)
+          values ('message-1', 'conversation-1', 'assistant', 'Hello', 10, 5);
+      `);
+      sqlite.close();
+
+      process.env.DATABASE_PATH = databasePath;
+      resetDatabaseForTests();
+
+      expect(db.select().from(messages).all()).toHaveLength(1);
+
+      const migratedSqlite = new Database(databasePath, { readonly: true });
+      const indexNames = migratedSqlite
+        .prepare("select name from sqlite_master where type = 'index' order by name")
+        .all()
+        .map((row) => (row as { name: string }).name);
+      const messageLookupPlan = migratedSqlite
+        .prepare(
+          "explain query plan select * from messages where conversation_id = ? order by created_at",
+        )
+        .all("conversation-1")
+        .map((row) => (row as { detail: string }).detail)
+        .join("\n");
+      migratedSqlite.close();
+
+      expect(indexNames).toEqual(
+        expect.arrayContaining([
+          "conversations_user_id_idx",
+          "messages_conversation_id_idx",
+          "sessions_user_id_idx",
+        ]),
+      );
+      expect(messageLookupPlan).toContain("messages_conversation_id_idx");
     } finally {
       resetDatabaseForTests();
 

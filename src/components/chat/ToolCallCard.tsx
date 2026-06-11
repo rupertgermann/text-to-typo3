@@ -135,11 +135,13 @@ export function ToolCallCard({
   part,
   defaultOpen = false,
   compact = false,
+  isPendingApproval = false,
   onApprovalResponse,
 }: {
   part: GenericToolPart;
   defaultOpen?: boolean;
   compact?: boolean;
+  isPendingApproval?: boolean;
   onApprovalResponse?: (response: {
     approved: boolean;
     id: string;
@@ -177,7 +179,15 @@ export function ToolCallCard({
     : part.output;
 
   return (
-    <div className={cn("rounded-xl border", toneClasses)}>
+    <div
+      id={`tool-call-${part.toolCallId}`}
+      className={cn(
+        "scroll-mt-8 rounded-xl border transition-shadow",
+        toneClasses,
+        isPendingApproval &&
+          "border-amber-500 ring-2 ring-amber-400/70 shadow-lg shadow-amber-950/10",
+      )}
+    >
       <button
         type="button"
         onClick={() => setIsOpen((open) => !open)}

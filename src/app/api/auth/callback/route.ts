@@ -5,9 +5,10 @@ import { db } from "@/lib/db";
 import { users, sessions } from "@/lib/db/schema";
 import { encrypt } from "@/lib/crypto";
 import { getSession } from "@/lib/session";
+import { withApiRoute } from "@/lib/api-route";
 import { getEnv } from "@/lib/env";
 
-export async function GET(request: NextRequest) {
+export const GET = withApiRoute(async (request: NextRequest) => {
   const env = getEnv();
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
@@ -126,4 +127,4 @@ export async function GET(request: NextRequest) {
   await session.save();
 
   return NextResponse.redirect(new URL("/", env.APP_URL));
-}
+});

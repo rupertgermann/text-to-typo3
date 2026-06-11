@@ -1,28 +1,18 @@
 import { type NextRequest } from "next/server";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { withAuth } from "@/lib/api-route";
 import {
   createConversationForUser,
   listConversationsForUser,
 } from "@/lib/conversations";
 
-export async function GET(request: NextRequest) {
-  const auth = await getAuthenticatedUser();
-  if (!auth) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+export const GET = withAuth(async (request: NextRequest, auth) => {
   const query = request.nextUrl.searchParams.get("q") ?? undefined;
   const userConversations = await listConversationsForUser(auth.user.id, query);
 
   return Response.json(userConversations);
-}
+});
 
-export async function POST(request: NextRequest) {
-  const auth = await getAuthenticatedUser();
-  if (!auth) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+export const POST = withAuth(async (request: NextRequest, auth) => {
   let body: { title?: unknown };
   try {
     body = await request.json();
@@ -38,4 +28,4 @@ export async function POST(request: NextRequest) {
   const conversation = await createConversationForUser(auth.user.id, title);
 
   return Response.json(conversation, { status: 201 });
-}
+});

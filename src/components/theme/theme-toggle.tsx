@@ -91,7 +91,7 @@ export function ThemeToggle() {
       type="button"
       variant="outline"
       size="sm"
-      className="gap-2"
+      className="h-9 gap-2"
       onClick={() => {
         const nextTheme = theme === "dark" ? "light" : "dark";
         applyTheme(nextTheme);

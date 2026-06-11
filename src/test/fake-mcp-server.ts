@@ -1,9 +1,14 @@
 import http from "node:http";
+import type net from "node:net";
 
 type JsonRpcRequest = {
   id?: string | number | null;
   method?: string;
   params?: Record<string, unknown>;
+};
+
+type FakeMcpRequest = JsonRpcRequest & {
+  headers: http.IncomingHttpHeaders;
 };
 
 export type FakeMcpToolCall = {
@@ -12,7 +17,7 @@ export type FakeMcpToolCall = {
 };
 
 export type FakeMcpServer = {
-  requests: JsonRpcRequest[];
+  requests: FakeMcpRequest[];
   toolCalls: FakeMcpToolCall[];
   url: string;
   close: () => Promise<void>;
@@ -65,10 +70,14 @@ const defaultTools = [
 ];
 
 export async function startFakeMcpServer(options?: {
+  hangMethods?: string[];
+  sessionIds?: string[];
   statusByMethod?: Record<string, number>;
 }): Promise<FakeMcpServer> {
-  const requests: JsonRpcRequest[] = [];
+  const requests: FakeMcpRequest[] = [];
+  const sockets = new Set<net.Socket>();
   const toolCalls: FakeMcpToolCall[] = [];
+  let sessionIdIndex = 0;
 
   const server = http.createServer(async (request, response) => {
     if (request.method !== "POST") {
@@ -77,10 +86,17 @@ export async function startFakeMcpServer(options?: {
     }
 
     const payload = JSON.parse(await readRequestBody(request)) as JsonRpcRequest;
-    requests.push(payload);
+    requests.push({ ...payload, headers: request.headers });
     const status = payload.method
       ? options?.statusByMethod?.[payload.method]
       : undefined;
+    const shouldHang = payload.method
+      ? options?.hangMethods?.includes(payload.method)
+      : false;
+
+    if (shouldHang) {
+      return;
+    }
 
     if (status) {
       response.writeHead(status, { "Content-Type": "application/json" });
@@ -95,7 +111,15 @@ export async function startFakeMcpServer(options?: {
     }
 
     response.setHeader("Content-Type", "application/json");
-    response.setHeader("Mcp-Session-Id", "fake-mcp-session");
+    const sessionId =
+      options?.sessionIds?.[Math.min(sessionIdIndex, options.sessionIds.length - 1)] ??
+      "fake-mcp-session";
+
+    if (payload.method === "initialize" && options?.sessionIds?.length) {
+      sessionIdIndex += 1;
+    }
+
+    response.setHeader("Mcp-Session-Id", sessionId);
 
     if (payload.method === "initialize") {
       response.end(
@@ -148,6 +172,13 @@ export async function startFakeMcpServer(options?: {
     );
   });
 
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => {
+      sockets.delete(socket);
+    });
+  });
+
   await listen(server);
   const address = server.address();
 
@@ -159,7 +190,7 @@ export async function startFakeMcpServer(options?: {
     requests,
     toolCalls,
     url: `http://127.0.0.1:${address.port}`,
-    close: () => close(server),
+    close: () => close(server, sockets),
   };
 }
 
@@ -218,7 +249,11 @@ function listen(server: http.Server): Promise<void> {
   });
 }
 
-function close(server: http.Server): Promise<void> {
+function close(server: http.Server, sockets: Set<net.Socket>): Promise<void> {
+  for (const socket of sockets) {
+    socket.destroy();
+  }
+
   return new Promise((resolve, reject) => {
     server.close((error) => {
       if (error) {

@@ -44,9 +44,11 @@ The chat interface is designed around the upstream TYPO3 MCP server toolset desc
 - `GetFlexFormSchema`
 - `WriteTable`
 
-The app supports multi-step MCP runs, so a single user request can read page context, inspect table schema, and continue into follow-up TYPO3 tool calls before the response is finalized.
+The app supports multi-step MCP runs, so a single user request can read page context, inspect table schema, and continue into follow-up TYPO3 tool calls before the response is finalized. `TYPO3_AGENT_MAX_STEPS` controls the request-level step cap.
 
-OpenAI and LM Studio models both use this toolset. The app routes provider requests differently where needed, but TYPO3-side MCP capabilities stay the same.
+OpenAI, LM Studio, and custom OpenAI-compatible models all use this toolset. The app routes provider requests differently where needed, but TYPO3-side MCP capabilities stay the same.
+
+Every MCP request uses a request-level timeout. Hung TYPO3 MCP endpoints return categorized API errors instead of leaving a chat request open indefinitely. MCP session IDs are cached with an expiry and refreshed transparently when the TYPO3 server rotates or expires a session.
 
 For content creation and updates, TYPO3 users should have:
 
@@ -69,6 +71,7 @@ TYPO3_MCP_ACCESS_TOKEN=
 TYPO3_LOCAL_USER_NAME=
 TYPO3_OAUTH_CLIENT_ID=
 TYPO3_OAUTH_CLIENT_SECRET=
+TYPO3_AGENT_MAX_STEPS=
 NEXT_PUBLIC_APP_URL=
 ```
 
@@ -315,6 +318,9 @@ NEXT_PUBLIC_APP_URL=http://localhost:3000
 OPENAI_API_KEY=your-openai-api-key
 ENCRYPTION_KEY=generate-a-64-char-hex-key
 SESSION_SECRET=generate-a-long-random-secret
+TYPO3_AGENT_MAX_STEPS=12
+MODEL_CATALOG_TIMEOUT_MS=4000
+DATABASE_PATH=data/app.db
 ```
 
 ### Working Example For Token-Based MCP Mode
@@ -327,6 +333,9 @@ NEXT_PUBLIC_APP_URL=http://localhost:3002
 OPENAI_API_KEY=your-openai-api-key
 ENCRYPTION_KEY=generate-a-64-char-hex-key
 SESSION_SECRET=generate-a-long-random-secret
+TYPO3_AGENT_MAX_STEPS=12
+MODEL_CATALOG_TIMEOUT_MS=4000
+DATABASE_PATH=data/app.db
 ```
 
 ## Notes About The TYPO3 OAuth Values

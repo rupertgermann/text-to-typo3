@@ -1,8 +1,5 @@
 import { redirect } from "next/navigation";
-import { eq, and, asc } from "drizzle-orm";
 import { getAuthenticatedUser } from "@/lib/auth";
-import { db } from "@/lib/db";
-import { conversations, messages } from "@/lib/db/schema";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ChatInterface } from "@/components/chat/ChatInterface";
@@ -11,7 +8,11 @@ import { SettingsModal } from "@/components/settings/settings-modal";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { getEnv } from "@/lib/env";
 import { getSelectedModelSummary } from "@/lib/models";
-import { formatTokenUsage, sumTokenUsage } from "@/lib/token-usage";
+import { formatTokenUsage } from "@/lib/token-usage";
+import {
+  getAssistantTokenUsage,
+  getConversationWithMessagesForUser,
+} from "@/lib/conversations";
 import { getPublicUserSettings } from "@/lib/user-settings";
 
 interface ConversationPageProps {
@@ -29,29 +30,13 @@ export default async function ConversationPage({
     redirect("/api/auth/login");
   }
 
-  const conversation = await db.query.conversations.findFirst({
-    where: and(
-      eq(conversations.id, id),
-      eq(conversations.user_id, user.id),
-    ),
-  });
+  const conversation = await getConversationWithMessagesForUser(user.id, id);
 
   if (!conversation) {
     redirect("/");
   }
 
-  const initialMessages = await db.query.messages.findMany({
-    where: eq(messages.conversation_id, id),
-    orderBy: [asc(messages.created_at)],
-  });
-  const conversationUsage = sumTokenUsage(
-    initialMessages
-      .filter((message) => message.role === "assistant")
-      .map((message) => ({
-        inputTokens: message.input_tokens,
-        outputTokens: message.output_tokens,
-      })),
-  );
+  const conversationUsage = await getAssistantTokenUsage(id);
 
   const initials = user.display_name
     .split(" ")
@@ -78,8 +63,8 @@ export default async function ConversationPage({
             </p>
           </div>
           <div className="flex items-center gap-2 md:gap-3">
-            <div className="hidden items-center gap-2 rounded-full border border-border/70 bg-card/80 px-2.5 py-1.5 md:flex">
-              <Avatar className="h-8 w-8">
+            <div className="hidden h-9 items-center gap-2 rounded-full border border-border/70 bg-card/80 px-2.5 text-sm md:flex">
+              <Avatar className="h-6 w-6">
                 <AvatarFallback className="text-xs">{initials}</AvatarFallback>
               </Avatar>
               <span className="text-sm text-muted-foreground">
@@ -88,7 +73,7 @@ export default async function ConversationPage({
             </div>
             <ThemeToggle />
             <div
-              className="hidden max-w-72 items-center gap-2 rounded-full border border-border/70 bg-card/80 px-3 py-1.5 text-sm md:flex"
+              className="hidden h-9 max-w-72 items-center gap-2 rounded-full border border-border/70 bg-card/80 px-3 text-sm md:flex"
               title={selectedModel.id}
             >
               <span className="shrink-0 text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -106,12 +91,12 @@ export default async function ConversationPage({
               typo3BaseUrl={env.TYPO3_BASE_URL || "Not configured"}
             />
             <a href={`/api/conversations/${id}/export`}>
-              <Button variant="outline" size="sm">
+              <Button variant="outline" size="sm" className="h-9">
                 Export Markdown
               </Button>
             </a>
             <form action="/api/auth/logout">
-              <Button variant="outline" size="sm">
+              <Button variant="outline" size="sm" className="h-9">
                 Logout
               </Button>
             </form>
@@ -122,7 +107,7 @@ export default async function ConversationPage({
         <ChatInterface
           conversationId={id}
           initialAutoApproveWrites={Boolean(conversation.auto_approve_writes)}
-          initialMessages={initialMessages}
+          initialMessages={conversation.messages}
         />
         </div>
     </div>

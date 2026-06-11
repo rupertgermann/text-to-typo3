@@ -1,11 +1,11 @@
 # Manual Test Plan
 
-This test plan covers the main app flow from login through chat, multi-step tool usage, settings, scaffold behavior, and export.
+This test plan covers the main app flow from login through chat, multi-step tool usage, Write Approval, settings, scaffold behavior, and export.
 
 ## 1. Environment And Startup
 
 1. Follow [docs/typo3-setup.md](./typo3-setup.md) to install the TYPO3-side Composer packages and collect the OAuth values.
-2. Create `.env.local` with TYPO3 OAuth credentials, `SESSION_SECRET`, `ENCRYPTION_KEY`, and either `OPENAI_API_KEY` or a plan to enter one in Settings.
+2. Create `.env.local` with TYPO3 OAuth credentials or token-mode MCP values, `SESSION_SECRET`, `ENCRYPTION_KEY`, and either `OPENAI_API_KEY` or a plan to enter one in Settings.
 3. Run `pnpm install`.
 4. Run `pnpm dev`.
 5. Open `http://localhost:3000`.
@@ -13,7 +13,7 @@ This test plan covers the main app flow from login through chat, multi-step tool
 Expected result:
 
 - The app loads without build errors.
-- Unauthenticated access redirects to TYPO3 OAuth login.
+- Unauthenticated access redirects to TYPO3 OAuth login in OAuth mode and opens the chat directly in token-based MCP mode.
 - During `pnpm dev`, Fast Refresh works without restarting the app for ordinary UI and route edits.
 
 ## 2. Authentication
@@ -85,6 +85,7 @@ Expected result:
 - The title auto-populates from the first message.
 - Inline rename persists.
 - Search filters the list in real time.
+- Rapid typing produces debounced requests, and the previous result list stays visible while refreshed results load.
 - Export downloads a `.md` file.
 - Delete removes the conversation after confirmation.
 
@@ -93,7 +94,8 @@ Expected result:
 1. Send a prompt that should trigger a TYPO3 read tool.
 2. Expand a tool card in the transcript.
 3. Open the Activity sidebar.
-4. If available, trigger a TYPO3 write tool in a safe workspace scenario.
+4. Trigger a TYPO3 write tool in a safe workspace scenario.
+5. Approve or deny the pending Write Approval from the banner above the composer.
 
 Expected result:
 
@@ -101,6 +103,9 @@ Expected result:
 - Expanded cards show input and output JSON.
 - Activity sidebar shows the same calls in order.
 - Read/write filtering works.
+- Pending Write Approval appears in the banner above the composer and on the related tool card.
+- Approve and Deny controls in the banner use the same approval path as the tool card controls.
+- The jump action reveals the related tool card.
 - Write operations show a TYPO3 backend link when record metadata is present.
 
 ## 8. TYPO3 Write Retry Behavior
@@ -118,23 +123,42 @@ Expected result:
 ## 9. Settings And Models
 
 1. Open `Settings`.
-2. Inspect the AI Model, LM Studio, and Account sections.
+2. Inspect the AI Model, Custom Endpoints, LM Studio, and Account sections.
 3. If using OpenAI, select a different model.
 4. If using LM Studio, enter the base URL and click `Fetch models`.
-5. Use the header model picker to switch models.
-6. With an LM Studio model selected, send a TYPO3 read request such as `What pages exist on my TYPO3 site?`
-7. With the same LM Studio model, send a TYPO3 mutation request such as `Add 3 text content examples to page 67`
+5. If using a custom OpenAI-compatible provider, enter its display name, base URL, and optional API key.
+6. Test OpenAI, LM Studio, a custom provider, and MCP from Settings as applicable.
+7. Select an LM Studio or custom provider model.
+8. Send a TYPO3 read request such as `What pages exist on my TYPO3 site?`
+9. Send a TYPO3 mutation request such as `Add 3 text content examples to page 67`.
 
 Expected result:
 
-- Settings load successfully.
-- Model context-window hints appear in the settings cards and header picker.
+- Saved Settings values appear immediately when the modal opens.
+- Provider model sections show loading or unavailable states independently.
+- OpenAI, LM Studio, and custom provider models can be selected from Settings.
+- Model context-window hints appear in model cards where available.
 - Model changes persist after refresh.
 - LM Studio models load when the endpoint is reachable.
-- LM Studio models can call TYPO3 MCP tools through the app.
-- LM Studio mutation requests can continue through multiple tool steps instead of stopping after the first read call.
+- Custom provider models load when the endpoint is reachable.
+- LM Studio and custom provider models can call TYPO3 MCP tools through the app.
+- OpenAI-compatible mutation requests can continue through multiple tool steps instead of stopping after the first read call.
 
-## 10. Scaffold CLI
+## 10. Error Handling And Timeouts
+
+1. Stop or block a local LM Studio or custom provider endpoint.
+2. Open Settings.
+3. Stop or block the TYPO3 MCP endpoint in a safe local environment.
+4. Send a chat request that needs MCP tools.
+
+Expected result:
+
+- Dead model providers appear as unavailable within the configured model catalog timeout.
+- Other provider model lists remain usable.
+- A hung TYPO3 MCP server returns a categorized API error within the MCP request timeout.
+- API errors use the `{ error: { code, message } }` shape.
+
+## 11. Scaffold CLI
 
 1. Run `pnpm scaffold --help`.
 2. Run `pnpm scaffold --dry-run --project-name demo-project`.

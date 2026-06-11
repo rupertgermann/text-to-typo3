@@ -19,6 +19,9 @@ A Tool Call that changes TYPO3 state (as opposed to inspecting it). Write Operat
 ### Write Approval
 The editor's explicit consent required before a Write Operation executes. While approval is pending, the assistant's work on that operation is blocked until the editor approves or denies. A Conversation with auto-approve enabled skips this gate for its Write Operations.
 
+### Pending Approval Banner
+A persistent composer-adjacent control surface that appears while a Write Approval is pending. It exposes Approve, Deny, and jump-to-call actions derived from the same pending-approval state as the related Tool Call card.
+
 ### Activity
 The filterable side view listing all Tool Calls of the current Conversation, separate from the transcript.
 
@@ -26,7 +29,19 @@ The filterable side view listing all Tool Calls of the current Conversation, sep
 A source of language models the editor can chat with: OpenAI, LM Studio, or a custom OpenAI-compatible endpoint.
 
 ### Model Catalog
-The set of models currently available to one editor, combined across all of that editor's configured Providers.
+The set of models currently available to one editor, combined across all of that editor's configured Providers. Each Provider has its own loading, ok, or unavailable state.
+
+### Context-Window Hint
+The model context-window value stored with the selected model. Chat budgeting uses this hint before falling back to static model heuristics and the conservative default.
+
+### Client Query
+A client-side data access entry keyed by a stable query key. It supports request deduplication, cached previous data, debounced keys, mutation, and event-driven revalidation.
+
+### Chat Turn
+One user-initiated chat operation: submit, regenerate, or approval continuation. Turn resolution produces the persistence plan and model input boundaries for the chat exchange.
+
+### API Error
+A JSON response shaped as `{ error: { code, message } }`, shared across API routes.
 
 ### Starter Prompt
 A predefined, editable example task shown in an empty Conversation to help the editor begin.

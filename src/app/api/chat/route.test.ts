@@ -95,6 +95,7 @@ describe("chat route integration", () => {
     await db.insert(userSettings).values({
       user_id: LOCAL_USER_ID,
       model_id: "fake-typo3-model",
+      model_context_window: 4096,
       lmstudio_model_id: "fake-typo3-model",
       lmstudio_base_url: fakeModel.url,
     });
@@ -140,6 +141,7 @@ describe("chat route integration", () => {
     expect(streamBody).toContain("The TYPO3 page tree starts with Home.");
     expect(localUser?.display_name).toBe("Local Test Editor");
     expect(fakeModel.chatRequests).toHaveLength(2);
+    expect(fakeModel.modelsRequests).toHaveLength(0);
     expect(fakeMcp.toolCalls).toEqual([
       { name: "GetPageTree", arguments: {} },
     ]);
@@ -187,6 +189,7 @@ describe("chat route integration", () => {
       conversationId: "conversation-budget",
       fakeMcpUrl: fakeMcp.url,
       fakeModelUrl: fakeModel.url,
+      modelContextWindow: 300,
     });
     const hugeToolOutput = "very-large-tool-output ".repeat(1000);
     await db.insert(messages).values({
@@ -230,6 +233,7 @@ describe("chat route integration", () => {
 
     expect(requestPayload).toContain("Newest question should stay");
     expect(requestPayload).not.toContain("very-large-tool-output");
+    expect(fakeModel.modelsRequests).toHaveLength(0);
     expect(persistedHugeMessage?.tool_calls).toContain("very-large-tool-output");
   });
 
@@ -423,9 +427,40 @@ describe("chat route integration", () => {
     const body = await response.json();
 
     expect(response.status).toBe(502);
-    expect(body.error).toBe("TYPO3 MCP authentication failed. Check the configured token.");
+    expect(body.error).toEqual({
+      code: "upstream_error",
+      message: "TYPO3 MCP authentication failed. Check the configured token.",
+    });
     expect(JSON.stringify(body)).not.toContain("test-mcp-token");
   });
+
+  it("returns a categorized MCP error when the MCP server hangs", async () => {
+    fakeMcp = await startFakeMcpServer({ hangMethods: ["tools/list"] });
+    fakeModel = await startFakeOpenAICompatibleServer({
+      chatResponses: [createTextResponse({ text: "Should not be used." })],
+      models: [{ id: "fake-typo3-model", context_length: 4096 }],
+    });
+    await seedTokenModeConversation({
+      conversationId: "conversation-mcp-hang",
+      fakeMcpUrl: fakeMcp.url,
+      fakeModelUrl: fakeModel.url,
+    });
+
+    const startedAt = Date.now();
+    const response = await postChat({
+      conversationId: "conversation-mcp-hang",
+      text: "Read the page tree",
+    });
+    const body = await response.json();
+
+    expect(Date.now() - startedAt).toBeLessThan(6_500);
+    expect(response.status).toBe(502);
+    expect(body.error).toEqual({
+      code: "upstream_error",
+      message: "TYPO3 MCP endpoint unreachable. Check Settings.",
+    });
+    expect(fakeModel.chatRequests).toHaveLength(0);
+  }, 10_000);
 
   it("pauses write tools until the user approves them", async () => {
     fakeMcp = await startFakeMcpServer();
@@ -728,6 +763,7 @@ async function seedTokenModeConversation({
   fakeMcpUrl,
   fakeModelUrl,
   customProvider,
+  modelContextWindow = 4096,
   title = "New conversation",
   autoApproveWrites = false,
 }: {
@@ -741,6 +777,7 @@ async function seedTokenModeConversation({
     id: string;
     remoteModelId: string;
   };
+  modelContextWindow?: number | null;
   title?: string;
 }) {
   vi.stubEnv("TYPO3_BASE_URL", "https://typo3.example.test");
@@ -763,6 +800,7 @@ async function seedTokenModeConversation({
     model_id: customProvider
       ? `custom:${customProvider.id}:${customProvider.remoteModelId}`
       : "fake-typo3-model",
+    model_context_window: modelContextWindow,
     lmstudio_model_id: customProvider ? null : "fake-typo3-model",
     lmstudio_base_url: customProvider ? null : fakeModelUrl,
     custom_providers: customProvider

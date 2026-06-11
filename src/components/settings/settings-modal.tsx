@@ -2,30 +2,39 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
-  AlertCircle,
   ArrowRight,
-  Check,
-  CheckCircle2,
   Loader2,
   PlugZap,
-  Plus,
   Settings as SettingsIcon,
-  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
 import {
-  getModelContextWindowLabel,
-  getModelContextWindowShortLabel,
   type AvailableModel,
+  type ProviderCatalog,
   type UserModelCatalog,
 } from "@/lib/models";
-import type { PublicCustomProvider, PublicUserSettings } from "@/lib/user-settings";
+import type { PublicUserSettings } from "@/lib/user-settings";
+import { readApiErrorMessage } from "@/lib/api-client";
+import {
+  ConnectionResult,
+  ConnectionTestButton,
+  formatConnectionStatus,
+  type ConnectionResponse,
+  type ConnectionStatus,
+} from "@/components/settings/provider-connection-tester";
+import {
+  ModelCard,
+  ModelSelector,
+  ProviderStatusLine,
+} from "@/components/settings/model-selector";
+import {
+  CustomProviderEditor,
+  type EditableCustomProvider,
+} from "@/components/settings/custom-provider-editor";
 
 interface SettingsModalProps {
   displayName: string;
@@ -35,116 +44,18 @@ interface SettingsModalProps {
 type RemoteModelCatalog = UserModelCatalog;
 const SETTINGS_UPDATED_EVENT = "text-to-typo3-settings-updated";
 
-type ConnectionStatus = {
-  tone: "success" | "error";
-  message: string;
-};
-
-type ConnectionResponse = {
-  ok: boolean;
-  error?: { message?: string };
-  modelCount?: number;
-  toolCount?: number;
-};
-
-type EditableCustomProvider = PublicCustomProvider & {
-  apiKey: string;
-};
-
-function ConnectionResult({ status }: { status: ConnectionStatus | null }) {
-  if (!status) {
-    return null;
-  }
-
-  const Icon = status.tone === "success" ? CheckCircle2 : AlertCircle;
-
-  return (
-    <div
-      className={cn(
-        "flex items-center gap-1.5 text-xs",
-        status.tone === "success" ? "text-emerald-600" : "text-destructive",
-      )}
-    >
-      <Icon className="h-3.5 w-3.5" />
-      <span>{status.message}</span>
-    </div>
-  );
-}
-
-function ModelCard({
-  model,
-  selected,
-  onSelect,
-}: {
-  model: AvailableModel;
-  selected: boolean;
-  onSelect: (model: AvailableModel) => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={() => onSelect(model)}
-      title={
-        model.description ??
-        (model.contextWindow ? `${model.name} • ${model.contextWindow.toLocaleString()} tokens` : model.name)
-      }
-      className={cn(
-        "flex w-full items-start justify-between gap-3 rounded-xl border px-3 py-2 text-left transition-colors",
-        selected
-          ? "border-primary bg-primary/5"
-          : "border-border bg-background hover:bg-muted/50",
-      )}
-    >
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="truncate text-sm font-medium">{model.name}</span>
-          <Badge variant={model.provider === "openai" ? "default" : "secondary"}>
-            {model.providerName ?? model.provider}
-          </Badge>
-          {model.contextWindow ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <span className="inline-flex items-center rounded-full border border-border/70 bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                    {getModelContextWindowShortLabel(model.contextWindow)}
-                  </span>
-                }
-              />
-              <TooltipContent>
-                {getModelContextWindowLabel(model.contextWindow)}
-              </TooltipContent>
-            </Tooltip>
-          ) : null}
-        </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          {model.description ??
-            (model.contextWindow
-              ? `${model.contextWindow.toLocaleString()} token context`
-              : "Context window unknown")}
-        </p>
-        {model.description ? (
-          <p className="mt-0.5 text-[11px] text-muted-foreground/80">
-            {model.contextWindow
-              ? `${model.contextWindow.toLocaleString()} token context`
-              : "Context window unknown"}
-          </p>
-        ) : null}
-      </div>
-      {selected ? <Check className="mt-0.5 h-4 w-4" /> : null}
-    </button>
-  );
-}
-
 export function SettingsModal({
   displayName,
   typo3BaseUrl,
 }: SettingsModalProps) {
   const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [settings, setSettings] = useState<PublicUserSettings | null>(null);
   const [models, setModels] = useState<AvailableModel[]>([]);
+  const [providerCatalogs, setProviderCatalogs] = useState<ProviderCatalog[]>([]);
   const [openaiKey, setOpenaiKey] = useState("");
   const [lmstudioBaseUrl, setLmstudioBaseUrl] = useState("");
   const [customProviders, setCustomProviders] = useState<EditableCustomProvider[]>([]);
@@ -172,6 +83,21 @@ export function SettingsModal({
     () => models.filter((model) => model.provider === "custom"),
     [models],
   );
+  const openAiProvider = providerCatalogs.find(
+    (provider) => provider.providerId === "openai",
+  );
+  const lmStudioProvider = providerCatalogs.find(
+    (provider) => provider.providerId === "lmstudio",
+  );
+  const customProviderById = useMemo(
+    () =>
+      new Map(
+        providerCatalogs
+          .filter((provider) => provider.provider === "custom")
+          .map((provider) => [provider.providerId, provider]),
+      ),
+    [providerCatalogs],
+  );
 
   useEffect(() => {
     if (!open) {
@@ -181,29 +107,28 @@ export function SettingsModal({
     let cancelled = false;
     const controller = new AbortController();
 
-    async function load() {
-      setLoading(true);
+    async function loadSettings() {
+      setSettingsLoading(true);
       setError(null);
 
       try {
-        const [settingsResponse, modelsResponse] = await Promise.all([
-          fetch("/api/settings", { signal: controller.signal }),
-          fetch("/api/models", { signal: controller.signal }),
-        ]);
+        const settingsResponse = await fetch("/api/settings", {
+          signal: controller.signal,
+        });
 
-        if (!settingsResponse.ok || !modelsResponse.ok) {
-          throw new Error("Failed to load settings");
+        if (!settingsResponse.ok) {
+          throw new Error(
+            await readApiErrorMessage(settingsResponse, "Failed to load settings"),
+          );
         }
 
         const settingsData: PublicUserSettings = await settingsResponse.json();
-        const catalog: RemoteModelCatalog = await modelsResponse.json();
 
         if (cancelled) {
           return;
         }
 
         setSettings(settingsData);
-        setModels(catalog.models);
         setLmstudioBaseUrl(settingsData.lmstudioBaseUrl ?? "");
         setCustomProviders(
           settingsData.customProviders.map((provider) => ({
@@ -217,13 +142,50 @@ export function SettingsModal({
         if (loadError instanceof Error && loadError.name === "AbortError") {
           return;
         }
-        setError("Failed to load settings");
+        setError(
+          loadError instanceof Error ? loadError.message : "Failed to load settings",
+        );
       } finally {
-        setLoading(false);
+        setSettingsLoading(false);
       }
     }
 
-    void load();
+    async function loadModels() {
+      setModelsLoading(true);
+
+      try {
+        const modelsResponse = await fetch("/api/models", {
+          signal: controller.signal,
+        });
+
+        if (!modelsResponse.ok) {
+          throw new Error(
+            await readApiErrorMessage(modelsResponse, "Failed to fetch models"),
+          );
+        }
+
+        const catalog: RemoteModelCatalog = await modelsResponse.json();
+
+        if (cancelled) {
+          return;
+        }
+
+        setModels(catalog.models);
+        setProviderCatalogs(catalog.providers);
+      } catch (loadError) {
+        if (loadError instanceof Error && loadError.name === "AbortError") {
+          return;
+        }
+        setError(
+          loadError instanceof Error ? loadError.message : "Failed to fetch models",
+        );
+      } finally {
+        setModelsLoading(false);
+      }
+    }
+
+    void loadSettings();
+    void loadModels();
 
     return () => {
       cancelled = true;
@@ -232,6 +194,7 @@ export function SettingsModal({
   }, [open]);
 
   async function refreshModels(nextLmStudioBaseUrl?: string) {
+    setModelsLoading(true);
     try {
       const response = await fetch(
         nextLmStudioBaseUrl
@@ -240,17 +203,22 @@ export function SettingsModal({
       );
 
       if (!response.ok) {
-        throw new Error("Failed to fetch models");
+        throw new Error(
+          await readApiErrorMessage(response, "Failed to fetch models"),
+        );
       }
 
       const catalog: RemoteModelCatalog = await response.json();
       setModels(catalog.models);
+      setProviderCatalogs(catalog.providers);
     } catch (refreshError) {
       setError(
         refreshError instanceof Error
           ? refreshError.message
           : "Failed to fetch models",
       );
+    } finally {
+      setModelsLoading(false);
     }
   }
 
@@ -289,7 +257,9 @@ export function SettingsModal({
       });
 
       if (!response.ok) {
-        throw new Error("Failed to save settings");
+        throw new Error(
+          await readApiErrorMessage(response, "Failed to save settings"),
+        );
       }
 
       const nextSettings: PublicUserSettings = await response.json();
@@ -435,7 +405,7 @@ export function SettingsModal({
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger
         render={
-          <Button variant="outline" size="sm" className="gap-2">
+          <Button variant="outline" size="sm" className="h-9 gap-2">
             <SettingsIcon className="h-4 w-4" />
             Settings
           </Button>
@@ -449,21 +419,33 @@ export function SettingsModal({
           </DialogDescription>
         </DialogHeader>
 
-        {loading ? (
-          <div className="flex items-center gap-2 rounded-xl border px-3 py-4 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Loading settings...
-          </div>
-        ) : (
-          <ScrollArea className="max-h-[70vh] pr-2">
+        <ScrollArea className="max-h-[70vh] pr-2">
             <div className="space-y-6 pb-2">
-              <section className="space-y-3 rounded-xl border p-4">
-                <div className="flex items-center gap-2">
-                  <Badge variant="secondary">AI Model</Badge>
-                  <span className="text-sm text-muted-foreground">
-                    Select the model used for responses.
-                  </span>
+              {settingsLoading ? (
+                <div className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading saved settings...
                 </div>
+              ) : null}
+
+              <ModelSelector
+                title="AI Model"
+                description="Select the model used for responses."
+                emptyMessage="No OpenAI models available yet."
+                loadingMessage="OpenAI models loading."
+                models={openAiModels}
+                selectedModelId={selectedModelId}
+                isLoading={modelsLoading}
+                provider={openAiProvider}
+                onSelect={(nextModel) => {
+                  setSelectedModelId(nextModel.id);
+                  setSelectedLmStudioModelId(
+                    nextModel.provider === "lmstudio"
+                      ? nextModel.id
+                      : selectedLmStudioModelId,
+                  );
+                }}
+              >
                 <div className="space-y-2">
                   <label className="text-sm font-medium">OpenAI API Key</label>
                   <div className="flex gap-2">
@@ -476,164 +458,46 @@ export function SettingsModal({
                       type="password"
                       className="flex-1"
                     />
-                    <Button
-                      type="button"
-                      variant="outline"
+                    <ConnectionTestButton
+                      isTesting={testingConnection === "openai"}
                       onClick={() => void testModelConnection("openai")}
-                      disabled={testingConnection === "openai"}
-                    >
-                      {testingConnection === "openai" ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <PlugZap className="h-4 w-4" />
-                      )}
-                      Test
-                    </Button>
+                    />
                   </div>
                   <ConnectionResult status={openaiConnection} />
                 </div>
-                <div className="grid gap-2 md:grid-cols-2">
-                  {openAiModels.length === 0 ? (
-                    <div className="rounded-xl border border-dashed p-3 text-sm text-muted-foreground">
-                      No OpenAI models available yet.
-                    </div>
-                  ) : (
-                    openAiModels.map((model) => (
-                      <ModelCard
-                        key={model.id}
-                        model={model}
-                        selected={selectedModelId === model.id}
-                        onSelect={(nextModel) => {
-                          setSelectedModelId(nextModel.id);
-                          setSelectedLmStudioModelId(
-                            nextModel.provider === "lmstudio" ? nextModel.id : selectedLmStudioModelId,
-                          );
-                        }}
-                      />
-                    ))
-                  )}
-                </div>
-              </section>
+              </ModelSelector>
 
-              <section className="space-y-3 rounded-xl border p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <Badge variant="secondary">Custom Endpoints</Badge>
-                    <span className="text-sm text-muted-foreground">
-                      Add OpenAI-compatible providers.
-                    </span>
-                  </div>
-                  <Button type="button" variant="outline" onClick={addCustomProvider}>
-                    <Plus className="h-4 w-4" />
-                    Add
-                  </Button>
-                </div>
+              <CustomProviderEditor
+                connections={customProviderConnections}
+                customProviderById={customProviderById}
+                isLoadingModels={modelsLoading}
+                models={customModels}
+                onAdd={addCustomProvider}
+                onRemove={removeCustomProvider}
+                onSelectModel={(nextModel) => {
+                  setSelectedModelId(nextModel.id);
+                }}
+                onTest={(provider) => void testCustomProviderConnection(provider)}
+                onUpdate={updateCustomProvider}
+                providers={customProviders}
+                selectedModelId={selectedModelId}
+                testingConnection={testingConnection}
+              />
 
-                <div className="space-y-3">
-                  {customProviders.length === 0 ? (
-                    <div className="rounded-xl border border-dashed p-3 text-sm text-muted-foreground">
-                      No custom endpoints configured.
-                    </div>
-                  ) : (
-                    customProviders.map((provider) => {
-                      const testingId = `custom:${provider.id}`;
-                      return (
-                        <div
-                          key={provider.id}
-                          className="space-y-2 rounded-xl border bg-muted/20 p-3"
-                        >
-                          <div className="grid gap-2 md:grid-cols-[1fr_1.5fr_1fr_auto]">
-                            <Input
-                              value={provider.displayName}
-                              onChange={(event) =>
-                                updateCustomProvider(provider.id, {
-                                  displayName: event.target.value,
-                                })
-                              }
-                              placeholder="Provider name"
-                            />
-                            <Input
-                              value={provider.baseUrl}
-                              onChange={(event) =>
-                                updateCustomProvider(provider.id, {
-                                  baseUrl: event.target.value,
-                                })
-                              }
-                              placeholder="https://provider.example/v1"
-                            />
-                            <Input
-                              value={provider.apiKey}
-                              onChange={(event) =>
-                                updateCustomProvider(provider.id, {
-                                  apiKey: event.target.value,
-                                })
-                              }
-                              placeholder={provider.hasApiKey ? "Key configured" : "API key"}
-                              type="password"
-                            />
-                            <div className="flex gap-2">
-                              <Button
-                                type="button"
-                                variant="outline"
-                                onClick={() =>
-                                  void testCustomProviderConnection(provider)
-                                }
-                                disabled={testingConnection === testingId}
-                              >
-                                {testingConnection === testingId ? (
-                                  <Loader2 className="h-4 w-4 animate-spin" />
-                                ) : (
-                                  <PlugZap className="h-4 w-4" />
-                                )}
-                                Test
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="icon"
-                                onClick={() => removeCustomProvider(provider.id)}
-                                aria-label="Remove custom endpoint"
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          </div>
-                          <ConnectionResult
-                            status={customProviderConnections[provider.id] ?? null}
-                          />
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-
-                <div className="grid gap-2 md:grid-cols-2">
-                  {customModels.length === 0 ? (
-                    <div className="rounded-xl border border-dashed p-3 text-sm text-muted-foreground">
-                      No custom endpoint models loaded.
-                    </div>
-                  ) : (
-                    customModels.map((model) => (
-                      <ModelCard
-                        key={model.id}
-                        model={model}
-                        selected={selectedModelId === model.id}
-                        onSelect={(nextModel) => {
-                          setSelectedModelId(nextModel.id);
-                        }}
-                      />
-                    ))
-                  )}
-                </div>
-              </section>
-
-              <section className="space-y-3 rounded-xl border p-4">
-                <div className="flex items-center gap-2">
-                  <Badge variant="secondary">LM Studio</Badge>
-                  <span className="text-sm text-muted-foreground">
-                    Point the app at a local OpenAI-compatible endpoint.
-                  </span>
-                </div>
+              <ModelSelector
+                title="LM Studio"
+                description="Point the app at a local OpenAI-compatible endpoint."
+                emptyMessage="No LM Studio models loaded."
+                loadingMessage="LM Studio models loading."
+                models={lmStudioModels}
+                selectedModelId={selectedModelId || selectedLmStudioModelId}
+                isLoading={modelsLoading && Boolean(lmstudioBaseUrl.trim())}
+                provider={lmStudioProvider}
+                onSelect={(nextModel) => {
+                  setSelectedModelId(nextModel.id);
+                  setSelectedLmStudioModelId(nextModel.id);
+                }}
+              >
                 <div className="flex gap-2">
                   <Input
                     value={lmstudioBaseUrl}
@@ -648,44 +512,13 @@ export function SettingsModal({
                   >
                     Fetch models
                   </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
+                  <ConnectionTestButton
+                    isTesting={testingConnection === "lmstudio"}
                     onClick={() => void testModelConnection("lmstudio")}
-                    disabled={testingConnection === "lmstudio"}
-                  >
-                    {testingConnection === "lmstudio" ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <PlugZap className="h-4 w-4" />
-                    )}
-                    Test
-                  </Button>
+                  />
                 </div>
                 <ConnectionResult status={lmstudioConnection} />
-                <div className="grid gap-2 md:grid-cols-2">
-                  {lmStudioModels.length === 0 ? (
-                    <div className="rounded-xl border border-dashed p-3 text-sm text-muted-foreground">
-                      No LM Studio models loaded.
-                    </div>
-                  ) : (
-                    lmStudioModels.map((model) => (
-                      <ModelCard
-                        key={model.id}
-                        model={model}
-                        selected={
-                          selectedModelId === model.id ||
-                          selectedLmStudioModelId === model.id
-                        }
-                        onSelect={(nextModel) => {
-                          setSelectedModelId(nextModel.id);
-                          setSelectedLmStudioModelId(nextModel.id);
-                        }}
-                      />
-                    ))
-                  )}
-                </div>
-              </section>
+              </ModelSelector>
 
               <section className="space-y-3 rounded-xl border p-4">
                 <div className="flex items-center gap-2">
@@ -711,19 +544,11 @@ export function SettingsModal({
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
+                  <ConnectionTestButton
+                    isTesting={testingConnection === "mcp"}
+                    label="Test MCP"
                     onClick={() => void testMcpConnection()}
-                    disabled={testingConnection === "mcp"}
-                  >
-                    {testingConnection === "mcp" ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <PlugZap className="h-4 w-4" />
-                    )}
-                    Test MCP
-                  </Button>
+                  />
                   <Button
                     type="button"
                     variant="outline"
@@ -744,7 +569,6 @@ export function SettingsModal({
               ) : null}
             </div>
           </ScrollArea>
-        )}
 
         <DialogFooter>
           <Button
@@ -763,23 +587,4 @@ export function SettingsModal({
       </DialogContent>
     </Dialog>
   );
-}
-
-function formatConnectionStatus(
-  body: ConnectionResponse,
-  noun: "model" | "tool",
-): ConnectionStatus {
-  if (body.ok) {
-    const count = noun === "model" ? body.modelCount : body.toolCount;
-    const label = noun === "model" ? "model" : "tool";
-    return {
-      tone: "success",
-      message: `${count ?? 0} ${label}${count === 1 ? "" : "s"} found`,
-    };
-  }
-
-  return {
-    tone: "error",
-    message: body.error?.message ?? "Connection failed",
-  };
 }

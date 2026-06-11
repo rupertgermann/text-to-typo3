@@ -6,6 +6,7 @@ import {
   type Conversation,
   type Message,
 } from "@/lib/db/schema";
+import type { TokenUsage } from "@/lib/token-usage";
 
 export type ConversationWithMessages = Conversation & {
   messages: Message[];
@@ -89,6 +90,28 @@ export async function getConversationWithMessagesForUser(
   });
 
   return { ...conversation, messages: conversationMessages };
+}
+
+export async function getAssistantTokenUsage(
+  conversationId: string,
+): Promise<TokenUsage> {
+  const [totals] = await db
+    .select({
+      inputTokens: sql<number | null>`sum(${messages.input_tokens})`,
+      outputTokens: sql<number | null>`sum(${messages.output_tokens})`,
+    })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.conversation_id, conversationId),
+        eq(messages.role, "assistant"),
+      ),
+    );
+
+  return {
+    inputTokens: totals?.inputTokens ?? null,
+    outputTokens: totals?.outputTokens ?? null,
+  };
 }
 
 export async function renameConversationForUser(

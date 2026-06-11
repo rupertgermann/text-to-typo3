@@ -105,11 +105,15 @@ export async function startFakeOpenAICompatibleServer({
   chatStatus = 200,
   models = [],
   modelsStatus = 200,
+  modelsDelayMs = 0,
+  modelsHang = false,
 }: {
   chatResponses: FakeChatResponse[];
   chatStatus?: number;
   models?: FakeModel[];
   modelsStatus?: number;
+  modelsDelayMs?: number;
+  modelsHang?: boolean;
 }): Promise<FakeOpenAICompatibleServer> {
   const chatRequests: unknown[] = [];
   const modelsRequests: unknown[] = [];
@@ -120,6 +124,12 @@ export async function startFakeOpenAICompatibleServer({
 
     if (request.method === "GET" && url.pathname === "/models") {
       modelsRequests.push({ headers: request.headers });
+      if (modelsHang) {
+        return;
+      }
+      if (modelsDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, modelsDelayMs));
+      }
       if (modelsStatus !== 200) {
         response.writeHead(modelsStatus, { "Content-Type": "application/json" });
         response.end(JSON.stringify({ error: { message: `HTTP ${modelsStatus}` } }));
@@ -266,5 +276,6 @@ function close(server: http.Server): Promise<void> {
       }
       resolve();
     });
+    server.closeAllConnections();
   });
 }

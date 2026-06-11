@@ -36,12 +36,18 @@ type McpToolResult = {
 
 type CachedToolSet = {
   fetchedAt: number;
+  requireWriteApproval: boolean;
   tools: ToolSet;
 };
 
 type McpMethodResponse<T> = {
   result: T;
   sessionHeaderId: string | null;
+};
+
+type CachedMcpSession = {
+  expiresAt: number;
+  sessionId: string;
 };
 
 export class McpHttpError extends Error {
@@ -51,8 +57,10 @@ export class McpHttpError extends Error {
 }
 
 const TOOL_CACHE_TTL_MS = 5 * 60 * 1000;
+const MCP_SESSION_CACHE_TTL_MS = 5 * 60 * 1000;
+const MCP_REQUEST_TIMEOUT_MS = 5_000;
 const toolCache = new Map<string, CachedToolSet>();
-const mcpSessionCache = new Map<string, string>();
+const mcpSessionCache = new Map<string, CachedMcpSession>();
 
 export function resetMcpCachesForTests(): void {
   toolCache.clear();
@@ -141,6 +149,7 @@ async function postJson(
   url: string,
   headers: Record<string, string>,
   body: string,
+  signal: AbortSignal,
 ): Promise<{
   status: number;
   headers: Headers;
@@ -154,6 +163,7 @@ async function postJson(
       method: "POST",
       headers,
       body,
+      signal,
     });
 
     return {
@@ -166,6 +176,11 @@ async function postJson(
   const transport = parsedUrl.protocol === "https:" ? https : http;
 
   return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+
     const request = transport.request(
       parsedUrl,
       {
@@ -192,6 +207,7 @@ async function postJson(
               return value ? [[key, value] as [string, string]] : [];
             });
 
+          cleanup();
           resolve({
             status: response.statusCode ?? 500,
             headers: new Headers(normalizedHeaders),
@@ -201,9 +217,77 @@ async function postJson(
       },
     );
 
-    request.on("error", reject);
+    const abortRequest = () => {
+      request.destroy(getAbortReason(signal));
+    };
+    const cleanup = () => {
+      signal.removeEventListener("abort", abortRequest);
+    };
+
+    request.on("error", (error) => {
+      cleanup();
+      reject(error);
+    });
+    signal.addEventListener("abort", abortRequest, { once: true });
     request.write(body);
     request.end();
+  });
+}
+
+async function withMcpRequestTimeout<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort(createMcpTimeoutError());
+  }, MCP_REQUEST_TIMEOUT_MS);
+
+  try {
+    return await operation(controller.signal);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function createMcpTimeoutError(): Error {
+  const error = new Error("MCP request timed out");
+  error.name = "AbortError";
+  return error;
+}
+
+function getAbortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : createMcpTimeoutError();
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function getCachedMcpSessionId(cacheKey: string, now = Date.now()): string | null {
+  const cached = mcpSessionCache.get(cacheKey);
+
+  if (!cached) {
+    return null;
+  }
+
+  if (cached.expiresAt <= now) {
+    mcpSessionCache.delete(cacheKey);
+    return null;
+  }
+
+  return cached.sessionId;
+}
+
+function setCachedMcpSessionId(
+  cacheKey: string,
+  sessionId: string,
+  now = Date.now(),
+): void {
+  mcpSessionCache.set(cacheKey, {
+    expiresAt: now + MCP_SESSION_CACHE_TTL_MS,
+    sessionId,
   });
 }
 
@@ -219,19 +303,22 @@ async function callMcpMethod<T>({
   sessionHeaderId?: string | null;
 }): Promise<McpMethodResponse<T>> {
   const mcpUrl = getTypo3McpUrl();
-  const response = await postJson(
-    mcpUrl,
-    {
-      "Content-Type": "application/json",
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-      ...(sessionHeaderId ? { "Mcp-Session-Id": sessionHeaderId } : {}),
-    },
-    JSON.stringify({
-      jsonrpc: "2.0",
-      id: crypto.randomUUID(),
-      method,
-      params,
-    }),
+  const response = await withMcpRequestTimeout((signal) =>
+    postJson(
+      mcpUrl,
+      {
+        "Content-Type": "application/json",
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        ...(sessionHeaderId ? { "Mcp-Session-Id": sessionHeaderId } : {}),
+      },
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: crypto.randomUUID(),
+        method,
+        params,
+      }),
+      signal,
+    ),
   );
 
   if (response.status < 200 || response.status >= 300) {
@@ -276,7 +363,11 @@ async function initializeMcp(accessToken: string): Promise<string | null> {
       },
     });
     return response.sessionHeaderId;
-  } catch {
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+
     // Some servers accept direct tools/list calls without initialize.
     return null;
   }
@@ -291,20 +382,25 @@ export async function getMcpTools({
   accessToken: string;
   requireWriteApproval?: boolean;
 }): Promise<ToolSet> {
-  const toolCacheKey = `${sessionId}:write-approval:${requireWriteApproval ? "manual" : "auto"}`;
+  const toolCacheKey = sessionId;
   const cached = toolCache.get(toolCacheKey);
   const now = Date.now();
 
-  if (cached && now - cached.fetchedAt < TOOL_CACHE_TTL_MS) {
+  if (
+    cached?.requireWriteApproval !== undefined &&
+    cached.requireWriteApproval !== requireWriteApproval
+  ) {
+    toolCache.delete(toolCacheKey);
+  } else if (cached && now - cached.fetchedAt < TOOL_CACHE_TTL_MS) {
     return cached.tools;
   }
 
-  let mcpSessionId = mcpSessionCache.get(sessionId) ?? null;
+  let mcpSessionId = getCachedMcpSessionId(sessionId, now);
 
   if (!mcpSessionId) {
     mcpSessionId = await initializeMcp(accessToken);
     if (mcpSessionId) {
-      mcpSessionCache.set(sessionId, mcpSessionId);
+      setCachedMcpSessionId(sessionId, mcpSessionId, now);
     }
   }
 
@@ -316,7 +412,7 @@ export async function getMcpTools({
   const activeMcpSessionId = listResponse.sessionHeaderId ?? mcpSessionId;
 
   if (activeMcpSessionId) {
-    mcpSessionCache.set(sessionId, activeMcpSessionId);
+    setCachedMcpSessionId(sessionId, activeMcpSessionId);
   }
 
   const tools = Object.fromEntries(
@@ -333,6 +429,15 @@ export async function getMcpTools({
           },
         ),
         execute: async (input) => {
+          let executeMcpSessionId = getCachedMcpSessionId(sessionId);
+
+          if (!executeMcpSessionId && activeMcpSessionId) {
+            executeMcpSessionId = await initializeMcp(accessToken);
+            if (executeMcpSessionId) {
+              setCachedMcpSessionId(sessionId, executeMcpSessionId);
+            }
+          }
+
           const result = await callMcpMethod<McpToolResult>({
             accessToken,
             method: "tools/call",
@@ -340,7 +445,7 @@ export async function getMcpTools({
               name: mcpTool.name,
               arguments: input,
             },
-            sessionHeaderId: mcpSessionCache.get(sessionId) ?? activeMcpSessionId,
+            sessionHeaderId: executeMcpSessionId,
           });
 
           const operation = classifyMcpTool(mcpTool.name);
@@ -363,7 +468,7 @@ export async function getMcpTools({
     ]),
   );
 
-  toolCache.set(toolCacheKey, { fetchedAt: now, tools });
+  toolCache.set(toolCacheKey, { fetchedAt: now, requireWriteApproval, tools });
   return tools;
 }
 

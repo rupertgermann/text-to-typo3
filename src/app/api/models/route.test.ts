@@ -12,7 +12,7 @@ import {
 
 describe("models route", () => {
   let testDatabase: TestDatabase | null = null;
-  let fakeModel: FakeOpenAICompatibleServer | null = null;
+  let fakeModels: FakeOpenAICompatibleServer[] = [];
 
   beforeEach(async () => {
     testDatabase = setupTestDatabase();
@@ -21,8 +21,8 @@ describe("models route", () => {
   });
 
   afterEach(async () => {
-    await fakeModel?.close();
-    fakeModel = null;
+    await Promise.all(fakeModels.map((server) => server.close()));
+    fakeModels = [];
     vi.unstubAllEnvs();
     testDatabase?.cleanup();
     testDatabase = null;
@@ -30,10 +30,11 @@ describe("models route", () => {
 
   it("merges OpenAI and LM Studio catalog entries for the user", async () => {
     const realFetch = globalThis.fetch;
-    fakeModel = await startFakeOpenAICompatibleServer({
+    const fakeModel = await startFakeOpenAICompatibleServer({
       chatResponses: [],
       models: [{ id: "local-chat", context_length: 8192 }],
     });
+    fakeModels.push(fakeModel);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -76,10 +77,11 @@ describe("models route", () => {
   });
 
   it("merges configured custom provider models with provider attribution", async () => {
-    fakeModel = await startFakeOpenAICompatibleServer({
+    const fakeModel = await startFakeOpenAICompatibleServer({
       chatResponses: [],
       models: [{ id: "custom-chat", context_length: 32768 }],
     });
+    fakeModels.push(fakeModel);
     await db.insert(userSettings).values({
       user_id: LOCAL_TOKEN_USER_ID,
       custom_providers: JSON.stringify([
@@ -105,6 +107,66 @@ describe("models route", () => {
         providerName: "Custom One",
         contextWindow: 32768,
       }),
+    );
+  });
+
+  it("returns healthy provider models when another provider hangs", async () => {
+    vi.stubEnv("MODEL_CATALOG_TIMEOUT_MS", "50");
+    const [hangingProvider, healthyProvider] = await Promise.all([
+      startFakeOpenAICompatibleServer({
+        chatResponses: [],
+        modelsHang: true,
+      }),
+      startFakeOpenAICompatibleServer({
+        chatResponses: [],
+        models: [{ id: "healthy-chat", context_length: 4096 }],
+      }),
+    ]);
+    fakeModels.push(hangingProvider, healthyProvider);
+    await db.insert(userSettings).values({
+      user_id: LOCAL_TOKEN_USER_ID,
+      custom_providers: JSON.stringify([
+        {
+          id: "hanging",
+          displayName: "Hanging Provider",
+          baseUrl: hangingProvider.url,
+        },
+        {
+          id: "healthy",
+          displayName: "Healthy Provider",
+          baseUrl: healthyProvider.url,
+        },
+      ]),
+    });
+
+    const startedAt = performance.now();
+    const response = await GET(
+      new NextRequest("http://localhost/api/models"),
+    );
+    const catalog = await response.json();
+    const elapsed = performance.now() - startedAt;
+
+    expect(elapsed).toBeLessThan(500);
+    expect(catalog.providers).toEqual([
+      expect.objectContaining({
+        providerId: "hanging",
+        providerName: "Hanging Provider",
+        status: "unavailable",
+        models: [],
+      }),
+      expect.objectContaining({
+        providerId: "healthy",
+        providerName: "Healthy Provider",
+        status: "ok",
+        models: [
+          expect.objectContaining({
+            id: "custom:healthy:healthy-chat",
+          }),
+        ],
+      }),
+    ]);
+    expect(catalog.models).toContainEqual(
+      expect.objectContaining({ id: "custom:healthy:healthy-chat" }),
     );
   });
 });

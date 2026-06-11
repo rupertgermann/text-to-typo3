@@ -35,6 +35,7 @@ import {
   deserializeMessageParts,
   extractMessageText,
 } from "@/lib/chat-message-parts";
+import { readApiErrorMessage } from "@/lib/api-client";
 import {
   starterPrompts,
   type StarterPromptCategory,
@@ -43,6 +44,7 @@ import {
   getChatAutoScrollBehavior,
   isNearChatBottom,
 } from "./chat-scroll";
+import { derivePendingApprovals } from "@/lib/pending-approvals";
 
 interface ChatInterfaceProps {
   initialAutoApproveWrites: boolean;
@@ -144,6 +146,15 @@ export function ChatInterface({
 
   const isLoading = status === "submitted" || status === "streaming";
   const lastTranscriptMessage = messages[messages.length - 1];
+  const pendingApprovals = useMemo(
+    () => derivePendingApprovals(messages),
+    [messages],
+  );
+  const pendingApprovalToolCallIds = useMemo(
+    () => new Set(pendingApprovals.map((approval) => approval.toolCallId)),
+    [pendingApprovals],
+  );
+  const firstPendingApproval = pendingApprovals[0] ?? null;
 
   const handleTranscriptScroll = useCallback(() => {
     const viewport = transcriptViewportRef.current;
@@ -274,7 +285,12 @@ export function ChatInterface({
       });
 
       if (!response.ok) {
-        throw new Error("Failed to update auto-approve setting");
+        throw new Error(
+          await readApiErrorMessage(
+            response,
+            "Failed to update auto-approve setting",
+          ),
+        );
       }
 
       const updated = await response.json() as {
@@ -305,6 +321,15 @@ export function ChatInterface({
     },
     [addToolApprovalResponse],
   );
+
+  const jumpToPendingApproval = useCallback((toolCallId: string) => {
+    const target = document.getElementById(`tool-call-${toolCallId}`);
+    if (!target) {
+      return;
+    }
+
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, []);
 
   const removeAttachment = (index: number) => {
     setAttachments((current) => {
@@ -430,6 +455,7 @@ export function ChatInterface({
                       : undefined
                   }
                   onToolApprovalResponse={handleToolApprovalResponse}
+                  pendingApprovalToolCallIds={pendingApprovalToolCallIds}
                 />
               ))
             )}
@@ -469,6 +495,51 @@ export function ChatInterface({
         </div>
 
         <div className="border-t border-border/70 bg-background/80 px-4 py-4 backdrop-blur">
+          {firstPendingApproval ? (
+            <div className="mx-auto mb-3 flex max-w-3xl flex-col gap-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-950 shadow-sm dark:border-amber-500/70 dark:bg-amber-950/40 dark:text-amber-100 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <div className="font-medium">Write approval pending</div>
+                <button
+                  type="button"
+                  className="mt-0.5 max-w-full truncate text-left text-xs underline decoration-amber-700/40 underline-offset-2 hover:decoration-current dark:decoration-amber-200/40"
+                  onClick={() => jumpToPendingApproval(firstPendingApproval.toolCallId)}
+                >
+                  Jump to {firstPendingApproval.toolName}
+                  {pendingApprovals.length > 1
+                    ? ` and ${pendingApprovals.length - 1} more`
+                    : ""}
+                </button>
+              </div>
+              <div className="flex shrink-0 gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() =>
+                    handleToolApprovalResponse({
+                      id: firstPendingApproval.id,
+                      approved: true,
+                    })
+                  }
+                >
+                  Approve
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="border-amber-700/30 bg-background/80 text-amber-950 hover:bg-background dark:text-amber-100"
+                  onClick={() =>
+                    handleToolApprovalResponse({
+                      id: firstPendingApproval.id,
+                      approved: false,
+                    })
+                  }
+                >
+                  Deny
+                </Button>
+              </div>
+            </div>
+          ) : null}
           <form onSubmit={handleSubmitEvent} className="mx-auto max-w-3xl">
             <div
               className={cn(

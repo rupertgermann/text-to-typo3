@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, index } from "drizzle-orm/sqlite-core";
 import { sql, type InferSelectModel } from "drizzle-orm";
 
 export const users = sqliteTable("users", {
@@ -27,7 +27,7 @@ export const sessions = sqliteTable("sessions", {
   created_at: integer("created_at")
     .notNull()
     .default(sql`(unixepoch())`),
-});
+}, (table) => [index("sessions_user_id_idx").on(table.user_id)]);
 
 export const conversations = sqliteTable("conversations", {
   id: text("id")
@@ -45,7 +45,7 @@ export const conversations = sqliteTable("conversations", {
   updated_at: integer("updated_at")
     .notNull()
     .default(sql`(unixepoch())`),
-});
+}, (table) => [index("conversations_user_id_idx").on(table.user_id)]);
 
 export const messages = sqliteTable("messages", {
   id: text("id")
@@ -63,13 +63,14 @@ export const messages = sqliteTable("messages", {
   created_at: integer("created_at")
     .notNull()
     .default(sql`(unixepoch())`),
-});
+}, (table) => [index("messages_conversation_id_idx").on(table.conversation_id)]);
 
 export const userSettings = sqliteTable("user_settings", {
   user_id: text("user_id")
     .primaryKey()
     .references(() => users.id),
   model_id: text("model_id"),
+  model_context_window: integer("model_context_window"),
   openai_api_key: text("openai_api_key"),
   lmstudio_base_url: text("lmstudio_base_url"),
   lmstudio_model_id: text("lmstudio_model_id"),
