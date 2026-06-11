@@ -151,7 +151,7 @@ export function ModelPickerDropdown({
               {selectedModel ? (
                 <>
                   <Badge variant="secondary" className="hidden sm:inline-flex">
-                    {selectedModel.provider}
+                    {selectedModel.providerName ?? selectedModel.provider}
                   </Badge>
                   <ModelContextChip model={selectedModel} />
                 </>
@@ -209,7 +209,7 @@ export function ModelPickerDropdown({
                         {model.name}
                       </span>
                       <Badge variant={model.provider === "openai" ? "default" : "secondary"}>
-                        {model.provider}
+                        {model.providerName ?? model.provider}
                       </Badge>
                     </span>
                     <span className="mt-1 block text-xs text-muted-foreground">

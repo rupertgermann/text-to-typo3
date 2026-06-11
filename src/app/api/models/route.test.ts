@@ -69,4 +69,37 @@ describe("models route", () => {
     ]);
     expect(catalog.hasOpenAIKey).toBe(true);
   });
+
+  it("merges configured custom provider models with provider attribution", async () => {
+    fakeModel = await startFakeOpenAICompatibleServer({
+      chatResponses: [],
+      models: [{ id: "custom-chat", context_length: 32768 }],
+    });
+    await db.insert(userSettings).values({
+      user_id: LOCAL_TOKEN_USER_ID,
+      custom_providers: JSON.stringify([
+        {
+          id: "custom-one",
+          displayName: "Custom One",
+          baseUrl: fakeModel.url,
+          apiKey: encrypt("custom-secret"),
+        },
+      ]),
+    });
+
+    const response = await GET(
+      new NextRequest("http://localhost/api/models"),
+    );
+    const catalog = await response.json();
+
+    expect(catalog.models).toContainEqual(
+      expect.objectContaining({
+        id: "custom:custom-one:custom-chat",
+        name: "custom chat",
+        provider: "custom",
+        providerName: "Custom One",
+        contextWindow: 32768,
+      }),
+    );
+  });
 });

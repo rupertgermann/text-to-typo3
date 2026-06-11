@@ -8,7 +8,9 @@ import {
   CheckCircle2,
   Loader2,
   PlugZap,
+  Plus,
   Settings as SettingsIcon,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -23,7 +25,7 @@ import {
   type AvailableModel,
   type UserModelCatalog,
 } from "@/lib/models";
-import type { PublicUserSettings } from "@/lib/user-settings";
+import type { PublicCustomProvider, PublicUserSettings } from "@/lib/user-settings";
 
 interface SettingsModalProps {
   displayName: string;
@@ -43,6 +45,10 @@ type ConnectionResponse = {
   error?: { message?: string };
   modelCount?: number;
   toolCount?: number;
+};
+
+type EditableCustomProvider = PublicCustomProvider & {
+  apiKey: string;
 };
 
 function ConnectionResult({ status }: { status: ConnectionStatus | null }) {
@@ -90,7 +96,7 @@ function ModelCard({
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{model.name}</span>
           <Badge variant={model.provider === "openai" ? "default" : "secondary"}>
-            {model.provider}
+            {model.providerName ?? model.provider}
           </Badge>
           {model.contextWindow ? (
             <Tooltip>
@@ -130,16 +136,18 @@ export function SettingsModal({
   const [models, setModels] = useState<AvailableModel[]>([]);
   const [openaiKey, setOpenaiKey] = useState("");
   const [lmstudioBaseUrl, setLmstudioBaseUrl] = useState("");
+  const [customProviders, setCustomProviders] = useState<EditableCustomProvider[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [selectedLmStudioModelId, setSelectedLmStudioModelId] = useState<string>("");
-  const [testingConnection, setTestingConnection] = useState<
-    "lmstudio" | "mcp" | "openai" | null
-  >(null);
+  const [testingConnection, setTestingConnection] = useState<string | null>(null);
   const [lmstudioConnection, setLmstudioConnection] =
     useState<ConnectionStatus | null>(null);
   const [mcpConnection, setMcpConnection] = useState<ConnectionStatus | null>(null);
   const [openaiConnection, setOpenaiConnection] =
     useState<ConnectionStatus | null>(null);
+  const [customProviderConnections, setCustomProviderConnections] = useState<
+    Record<string, ConnectionStatus | null>
+  >({});
 
   const openAiModels = useMemo(
     () => models.filter((model) => model.provider === "openai"),
@@ -147,6 +155,10 @@ export function SettingsModal({
   );
   const lmStudioModels = useMemo(
     () => models.filter((model) => model.provider === "lmstudio"),
+    [models],
+  );
+  const customModels = useMemo(
+    () => models.filter((model) => model.provider === "custom"),
     [models],
   );
 
@@ -182,6 +194,12 @@ export function SettingsModal({
         setSettings(settingsData);
         setModels(catalog.models);
         setLmstudioBaseUrl(settingsData.lmstudioBaseUrl ?? "");
+        setCustomProviders(
+          settingsData.customProviders.map((provider) => ({
+            ...provider,
+            apiKey: "",
+          })),
+        );
         setSelectedModelId(settingsData.modelId ?? "");
         setSelectedLmStudioModelId(settingsData.lmstudioModelId ?? "");
       } catch (loadError) {
@@ -243,6 +261,19 @@ export function SettingsModal({
             selectedModel?.provider === "lmstudio"
               ? selectedModel.id
               : selectedLmStudioModelId || null,
+          customProviders: customProviders
+            .filter(
+              (provider) =>
+                provider.displayName.trim() || provider.baseUrl.trim(),
+            )
+            .map((provider) => ({
+              id: provider.id,
+              displayName: provider.displayName,
+              baseUrl: provider.baseUrl,
+              apiKey: provider.apiKey.trim()
+                ? provider.apiKey.trim()
+                : undefined,
+            })),
         }),
       });
 
@@ -252,6 +283,12 @@ export function SettingsModal({
 
       const nextSettings: PublicUserSettings = await response.json();
       setSettings(nextSettings);
+      setCustomProviders(
+        nextSettings.customProviders.map((provider) => ({
+          ...provider,
+          apiKey: "",
+        })),
+      );
       setOpenaiKey("");
       window.dispatchEvent(new Event(SETTINGS_UPDATED_EVENT));
       setOpen(false);
@@ -305,6 +342,79 @@ export function SettingsModal({
         tone: "error",
         message: "Connection test failed",
       });
+    } finally {
+      setTestingConnection(null);
+    }
+  }
+
+  function updateCustomProvider(
+    id: string,
+    patch: Partial<EditableCustomProvider>,
+  ) {
+    setCustomProviders((current) =>
+      current.map((provider) =>
+        provider.id === id ? { ...provider, ...patch } : provider,
+      ),
+    );
+  }
+
+  function addCustomProvider() {
+    const id = crypto.randomUUID().replace(/-/g, "");
+    setCustomProviders((current) => [
+      ...current,
+      {
+        id,
+        displayName: "",
+        baseUrl: "",
+        hasApiKey: false,
+        apiKey: "",
+      },
+    ]);
+  }
+
+  function removeCustomProvider(id: string) {
+    setCustomProviders((current) =>
+      current.filter((provider) => provider.id !== id),
+    );
+    setCustomProviderConnections((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+  }
+
+  async function testCustomProviderConnection(provider: EditableCustomProvider) {
+    const testingId = `custom:${provider.id}`;
+    setTestingConnection(testingId);
+    setCustomProviderConnections((current) => ({
+      ...current,
+      [provider.id]: null,
+    }));
+
+    try {
+      const response = await fetch("/api/settings/test-model-provider", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: "custom",
+          customProviderId: provider.id,
+          apiKey: provider.apiKey.trim() ? provider.apiKey.trim() : undefined,
+          baseUrl: provider.baseUrl.trim() || undefined,
+        }),
+      });
+      const body: ConnectionResponse = await response.json();
+      setCustomProviderConnections((current) => ({
+        ...current,
+        [provider.id]: formatConnectionStatus(body, "model"),
+      }));
+    } catch {
+      setCustomProviderConnections((current) => ({
+        ...current,
+        [provider.id]: {
+          tone: "error",
+          message: "Connection test failed",
+        },
+      }));
     } finally {
       setTestingConnection(null);
     }
@@ -387,6 +497,118 @@ export function SettingsModal({
                           setSelectedLmStudioModelId(
                             nextModel.provider === "lmstudio" ? nextModel.id : selectedLmStudioModelId,
                           );
+                        }}
+                      />
+                    ))
+                  )}
+                </div>
+              </section>
+
+              <section className="space-y-3 rounded-xl border p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="secondary">Custom Endpoints</Badge>
+                    <span className="text-sm text-muted-foreground">
+                      Add OpenAI-compatible providers.
+                    </span>
+                  </div>
+                  <Button type="button" variant="outline" onClick={addCustomProvider}>
+                    <Plus className="h-4 w-4" />
+                    Add
+                  </Button>
+                </div>
+
+                <div className="space-y-3">
+                  {customProviders.length === 0 ? (
+                    <div className="rounded-xl border border-dashed p-3 text-sm text-muted-foreground">
+                      No custom endpoints configured.
+                    </div>
+                  ) : (
+                    customProviders.map((provider) => {
+                      const testingId = `custom:${provider.id}`;
+                      return (
+                        <div
+                          key={provider.id}
+                          className="space-y-2 rounded-xl border bg-muted/20 p-3"
+                        >
+                          <div className="grid gap-2 md:grid-cols-[1fr_1.5fr_1fr_auto]">
+                            <Input
+                              value={provider.displayName}
+                              onChange={(event) =>
+                                updateCustomProvider(provider.id, {
+                                  displayName: event.target.value,
+                                })
+                              }
+                              placeholder="Provider name"
+                            />
+                            <Input
+                              value={provider.baseUrl}
+                              onChange={(event) =>
+                                updateCustomProvider(provider.id, {
+                                  baseUrl: event.target.value,
+                                })
+                              }
+                              placeholder="https://provider.example/v1"
+                            />
+                            <Input
+                              value={provider.apiKey}
+                              onChange={(event) =>
+                                updateCustomProvider(provider.id, {
+                                  apiKey: event.target.value,
+                                })
+                              }
+                              placeholder={provider.hasApiKey ? "Key configured" : "API key"}
+                              type="password"
+                            />
+                            <div className="flex gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() =>
+                                  void testCustomProviderConnection(provider)
+                                }
+                                disabled={testingConnection === testingId}
+                              >
+                                {testingConnection === testingId ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                  <PlugZap className="h-4 w-4" />
+                                )}
+                                Test
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="icon"
+                                onClick={() => removeCustomProvider(provider.id)}
+                                aria-label="Remove custom endpoint"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          </div>
+                          <ConnectionResult
+                            status={customProviderConnections[provider.id] ?? null}
+                          />
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                <div className="grid gap-2 md:grid-cols-2">
+                  {customModels.length === 0 ? (
+                    <div className="rounded-xl border border-dashed p-3 text-sm text-muted-foreground">
+                      No custom endpoint models loaded.
+                    </div>
+                  ) : (
+                    customModels.map((model) => (
+                      <ModelCard
+                        key={model.id}
+                        model={model}
+                        selected={selectedModelId === model.id}
+                        onSelect={(nextModel) => {
+                          setSelectedModelId(nextModel.id);
                         }}
                       />
                     ))

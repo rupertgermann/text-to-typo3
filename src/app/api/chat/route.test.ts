@@ -4,6 +4,7 @@ import { POST } from "./route";
 import { db, setupTestDatabase, type TestDatabase } from "@/test/database";
 import { conversations, messages, userSettings, users } from "@/lib/db/schema";
 import { deserializeMessageParts } from "@/lib/chat-message-parts";
+import { encrypt } from "@/lib/crypto";
 import { resetMcpCachesForTests } from "@/lib/mcp";
 import { startFakeMcpServer, type FakeMcpServer } from "@/test/fake-mcp-server";
 import {
@@ -424,17 +425,80 @@ describe("chat route integration", () => {
     expect(body.error).toBe("TYPO3 MCP authentication failed. Check the configured token.");
     expect(JSON.stringify(body)).not.toContain("test-mcp-token");
   });
+
+  it("streams a tool-call response through a selected custom provider", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({
+      chatResponses: [
+        createToolCallResponse({
+          toolCallId: "call-page-tree-custom",
+          toolName: "GetPageTree",
+          argumentsJson: "{}",
+        }),
+        createTextResponse({
+          text: "Custom provider read the TYPO3 page tree.",
+          usage: { inputTokens: 15, outputTokens: 6 },
+        }),
+      ],
+      models: [{ id: "custom-chat", context_length: 4096 }],
+    });
+    await seedTokenModeConversation({
+      conversationId: "conversation-custom-provider",
+      fakeMcpUrl: fakeMcp.url,
+      fakeModelUrl: fakeModel.url,
+      customProvider: {
+        id: "custom-one",
+        displayName: "Custom One",
+        remoteModelId: "custom-chat",
+        apiKey: "custom-secret",
+      },
+    });
+
+    const response = await postChat({
+      conversationId: "conversation-custom-provider",
+      text: "Read the page tree using custom provider",
+    });
+
+    expect(response.status).toBe(200);
+    await response.text();
+
+    const assistant = await latestAssistantMessage("conversation-custom-provider");
+    const firstRequest = fakeModel.chatRequests[0] as {
+      model?: string;
+      tools?: unknown[];
+    };
+
+    expect(firstRequest.model).toBe("custom-chat");
+    expect(firstRequest.tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          function: expect.objectContaining({ name: "GetPageTree" }),
+        }),
+      ]),
+    );
+    expect(fakeMcp.toolCalls).toEqual([
+      { name: "GetPageTree", arguments: {} },
+    ]);
+    expect(assistant?.content).toBe("Custom provider read the TYPO3 page tree.");
+  });
 });
 
 async function seedTokenModeConversation({
   conversationId,
   fakeMcpUrl,
   fakeModelUrl,
+  customProvider,
   title = "New conversation",
 }: {
   conversationId: string;
   fakeMcpUrl: string;
   fakeModelUrl: string;
+  customProvider?: {
+    apiKey: string;
+    displayName: string;
+    id: string;
+    remoteModelId: string;
+  };
   title?: string;
 }) {
   vi.stubEnv("TYPO3_BASE_URL", "https://typo3.example.test");
@@ -453,9 +517,21 @@ async function seedTokenModeConversation({
   });
   await db.insert(userSettings).values({
     user_id: LOCAL_USER_ID,
-    model_id: "fake-typo3-model",
-    lmstudio_model_id: "fake-typo3-model",
-    lmstudio_base_url: fakeModelUrl,
+    model_id: customProvider
+      ? `custom:${customProvider.id}:${customProvider.remoteModelId}`
+      : "fake-typo3-model",
+    lmstudio_model_id: customProvider ? null : "fake-typo3-model",
+    lmstudio_base_url: customProvider ? null : fakeModelUrl,
+    custom_providers: customProvider
+      ? JSON.stringify([
+          {
+            id: customProvider.id,
+            displayName: customProvider.displayName,
+            baseUrl: fakeModelUrl,
+            apiKey: encrypt(customProvider.apiKey),
+          },
+        ])
+      : null,
   });
 }
 

@@ -14,7 +14,10 @@ import { conversations, messages } from "@/lib/db/schema";
 import { getAuthenticatedUser } from "@/lib/auth";
 import { getEnv } from "@/lib/env";
 import { getMcpTools, getTypo3McpUrl } from "@/lib/mcp";
-import { getResolvedUserSettings } from "@/lib/user-settings";
+import {
+  getResolvedUserSettings,
+  type ResolvedCustomProvider,
+} from "@/lib/user-settings";
 import {
   deserializeMessageParts,
   extractMessageText,
@@ -26,7 +29,11 @@ import {
   getAgentLoopStepOptions,
 } from "@/lib/agent-loop-policy";
 import { budgetModelMessages } from "@/lib/context-budget";
-import { getModelContextWindowHint, listLmStudioModels } from "@/lib/models";
+import {
+  getModelContextWindowHint,
+  listCustomProviderModels,
+  listLmStudioModels,
+} from "@/lib/models";
 import { normalizeLanguageModelUsage } from "@/lib/token-usage";
 import { getChatErrorMessage } from "@/lib/chat-errors";
 
@@ -47,6 +54,33 @@ function getConversationTitle(text: string): string {
     .split(/\s+/)
     .slice(0, 6)
     .join(" ");
+}
+
+function parseCustomModelId(
+  modelId: string,
+): { providerId: string; remoteModelId: string } | null {
+  const match = /^custom:([^:]+):(.+)$/.exec(modelId);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    providerId: match[1],
+    remoteModelId: match[2],
+  };
+}
+
+function resolveCustomProviderSelection(
+  modelId: string,
+  providers: ResolvedCustomProvider[],
+): { provider: ResolvedCustomProvider; remoteModelId: string } | null {
+  const parsed = parseCustomModelId(modelId);
+  if (!parsed) {
+    return null;
+  }
+
+  const provider = providers.find((entry) => entry.id === parsed.providerId);
+  return provider ? { provider, remoteModelId: parsed.remoteModelId } : null;
 }
 
 function sanitizeGeneratedTitle(text: string): string | null {
@@ -291,24 +325,45 @@ export async function POST(request: NextRequest) {
 
   const env = getEnv();
   const userSettings = await getResolvedUserSettings(userId);
+  const configuredModelId = userSettings.modelId || "gpt-5.4-mini";
+  const parsedCustomModel = parseCustomModelId(configuredModelId);
+  const selectedCustomProvider = resolveCustomProviderSelection(
+    configuredModelId,
+    userSettings.customProviders,
+  );
+
+  if (parsedCustomModel && !selectedCustomProvider) {
+    return Response.json(
+      { error: "The selected custom provider is no longer configured." },
+      { status: 400 },
+    );
+  }
+
+  const useCustomProvider = Boolean(selectedCustomProvider);
   const useLmStudio =
+    !useCustomProvider &&
     Boolean(userSettings.lmstudioBaseUrl) &&
-    Boolean(userSettings.modelId) &&
-    userSettings.modelId === userSettings.lmstudioModelId;
-  const modelId = userSettings.modelId || "gpt-5.4-mini";
-  const lmStudioModelContextWindow = useLmStudio && userSettings.lmstudioBaseUrl
+    configuredModelId === userSettings.lmstudioModelId;
+  const modelId =
+    selectedCustomProvider?.remoteModelId ?? configuredModelId;
+  const selectedModelContextWindow = selectedCustomProvider
+    ? (await listCustomProviderModels([selectedCustomProvider.provider])).find(
+        (model) => model.id === configuredModelId,
+      )?.contextWindow
+    : useLmStudio && userSettings.lmstudioBaseUrl
     ? (await listLmStudioModels(userSettings.lmstudioBaseUrl)).find(
         (model) => model.id === modelId,
       )?.contextWindow
     : null;
   const budgetedModelMessages = budgetModelMessages(modelMessages, {
-    contextWindow: lmStudioModelContextWindow ?? getModelContextWindowHint(modelId),
+    contextWindow:
+      selectedModelContextWindow ?? getModelContextWindowHint(modelId),
     reservedOutputTokens: 4096,
   });
   const openAiApiKey =
     userSettings.openAiApiKey || env.OPENAI_API_KEY || process.env.OPENAI_API_KEY;
 
-  if (!useLmStudio && !openAiApiKey) {
+  if (!useLmStudio && !useCustomProvider && !openAiApiKey) {
     return Response.json(
       { error: "Missing OpenAI API key. Add one in settings or .env.local." },
       { status: 400 },
@@ -316,14 +371,22 @@ export async function POST(request: NextRequest) {
   }
 
   const provider = createOpenAI({
-    apiKey: useLmStudio ? "lm-studio" : openAiApiKey,
-    baseURL: useLmStudio ? userSettings.lmstudioBaseUrl || undefined : undefined,
+    apiKey: useCustomProvider
+      ? selectedCustomProvider?.provider.apiKey || "custom-provider"
+      : useLmStudio
+        ? "lm-studio"
+        : openAiApiKey,
+    baseURL: useCustomProvider
+      ? selectedCustomProvider?.provider.baseUrl
+      : useLmStudio
+        ? userSettings.lmstudioBaseUrl || undefined
+        : undefined,
   });
   const maxSteps = getAgentLoopMaxSteps();
 
   let tools;
   try {
-    tools = !useLmStudio && supportsBuiltInMcpTool(modelId)
+    tools = !useLmStudio && !useCustomProvider && supportsBuiltInMcpTool(modelId)
       ? {
           typo3: provider.tools.mcp({
             serverLabel: "typo3",
@@ -346,7 +409,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const model = useLmStudio ? provider.chat(modelId) : provider.responses(modelId);
+  const isChatCompletionsPath = useLmStudio || useCustomProvider;
+  const model = isChatCompletionsPath
+    ? provider.chat(modelId)
+    : provider.responses(modelId);
   const result = streamText({
     model,
     maxRetries: 0,
@@ -356,7 +422,7 @@ export async function POST(request: NextRequest) {
     tools,
     prepareStep: ({ stepNumber, steps }) =>
       getAgentLoopStepOptions({
-        isChatCompletionsPath: useLmStudio,
+        isChatCompletionsPath,
         userText,
         stepNumber,
         maxSteps,

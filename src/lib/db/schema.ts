@@ -72,6 +72,7 @@ export const userSettings = sqliteTable("user_settings", {
   openai_api_key: text("openai_api_key"),
   lmstudio_base_url: text("lmstudio_base_url"),
   lmstudio_model_id: text("lmstudio_model_id"),
+  custom_providers: text("custom_providers"),
 });
 
 export type User = InferSelectModel<typeof users>;

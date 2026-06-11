@@ -1,8 +1,10 @@
+import type { PublicCustomProvider, ResolvedCustomProvider } from "@/lib/user-settings";
+
 type OpenAIModelsResponse = {
   data?: Array<{ id?: string }>;
 };
 
-type LmStudioModelsResponse = {
+type OpenAICompatibleModelsResponse = {
   data?: Array<{
     id?: string;
     name?: string;
@@ -12,12 +14,15 @@ type LmStudioModelsResponse = {
   }>;
 };
 
-export type ModelProvider = "openai" | "lmstudio";
+export type ModelProvider = "openai" | "lmstudio" | "custom";
 
 export interface AvailableModel {
   id: string;
   name: string;
   provider: ModelProvider;
+  providerId?: string | null;
+  providerName?: string | null;
+  remoteModelId?: string | null;
   contextWindow: number | null;
   baseUrl?: string | null;
   description?: string | null;
@@ -28,6 +33,7 @@ export interface UserModelCatalog {
   selectedModelId: string | null;
   lmstudioBaseUrl: string | null;
   hasOpenAIKey: boolean;
+  customProviders: PublicCustomProvider[];
 }
 
 function normalizeModelId(id: string): string {
@@ -89,10 +95,21 @@ function buildDisplayName(id: string): string {
 type LmStudioModelCandidate = {
   id: string;
   name: string;
-  provider: "lmstudio";
+  provider: "lmstudio" | "custom";
+  providerId: string;
+  providerName: string;
+  remoteModelId: string;
   contextWindow: number | null;
   baseUrl: string;
 } | null;
+
+type OpenAICompatibleProviderConfig = {
+  apiKey?: string | null;
+  baseUrl: string;
+  displayName: string;
+  id: string;
+  provider: "lmstudio" | "custom";
+};
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -126,6 +143,9 @@ export async function listOpenAIModels(
         id: normalizeModelId(id),
         name: buildDisplayName(id),
         provider: "openai" as const,
+        providerId: "openai",
+        providerName: "OpenAI",
+        remoteModelId: id,
         contextWindow: getModelContextWindowHint(id),
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -141,10 +161,45 @@ export async function listLmStudioModels(
     return [];
   }
 
+  return listOpenAICompatibleModels({
+    baseUrl,
+    displayName: "LM Studio",
+    id: "lmstudio",
+    provider: "lmstudio",
+  });
+}
+
+export async function listCustomProviderModels(
+  providers: ResolvedCustomProvider[],
+): Promise<AvailableModel[]> {
+  const providerModels = await Promise.all(
+    providers.map((provider) =>
+      listOpenAICompatibleModels({
+        apiKey: provider.apiKey,
+        baseUrl: provider.baseUrl,
+        displayName: provider.displayName,
+        id: provider.id,
+        provider: "custom",
+      }),
+    ),
+  );
+
+  return providerModels.flat().sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function listOpenAICompatibleModels(
+  providerConfig: OpenAICompatibleProviderConfig,
+): Promise<AvailableModel[]> {
+  const { apiKey, baseUrl, displayName, id: providerId, provider } = providerConfig;
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
 
   try {
-    const json = await fetchJson<LmStudioModelsResponse>(`${normalizedBaseUrl}/models`);
+    const json = await fetchJson<OpenAICompatibleModelsResponse>(
+      `${normalizedBaseUrl}/models`,
+      {
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+      },
+    );
     const rawModels = Array.isArray(json?.data) ? json.data : [];
 
     return rawModels
@@ -153,11 +208,18 @@ export async function listLmStudioModels(
         if (!id) {
           return null;
         }
+        const remoteModelId = normalizeModelId(id);
 
         return {
-          id,
+          id:
+            provider === "custom"
+              ? `custom:${providerId}:${remoteModelId}`
+              : remoteModelId,
           name: entry.name?.trim() || buildDisplayName(id),
-          provider: "lmstudio" as const,
+          provider,
+          providerId,
+          providerName: displayName,
+          remoteModelId,
           contextWindow:
             entry.context_length ??
             entry.max_context_length ??
