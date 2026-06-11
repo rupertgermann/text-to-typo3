@@ -7,7 +7,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { eq } from "drizzle-orm";
 import { resetDatabaseForTests, resolveDatabasePath } from "./index";
-import { conversations, messages, users } from "./schema";
+import { conversations, messages, userSettings, users } from "./schema";
 import { db, setupTestDatabase, type TestDatabase } from "@/test/database";
 
 describe("database factory", () => {
@@ -66,14 +66,21 @@ describe("database factory", () => {
       resetDatabaseForTests();
 
       expect(() => db.select().from(conversations).all()).not.toThrow();
+      expect(() => db.select().from(userSettings).all()).not.toThrow();
 
       const migratedSqlite = new Database(databasePath, { readonly: true });
       const columns = migratedSqlite.pragma("table_info(conversations)") as Array<{
         name: string;
       }>;
+      const userSettingsColumns = migratedSqlite.pragma("table_info(user_settings)") as Array<{
+        name: string;
+      }>;
       migratedSqlite.close();
 
       expect(columns.map((column) => column.name)).toContain("auto_approve_writes");
+      expect(userSettingsColumns.map((column) => column.name)).toContain(
+        "model_context_window",
+      );
     } finally {
       resetDatabaseForTests();
 

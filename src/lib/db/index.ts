@@ -31,6 +31,7 @@ function getDb(): BetterSQLite3Database<typeof schema> {
     const database = drizzle(sqlite, { schema });
     try {
       migrate(database, { migrationsFolder: path.join(process.cwd(), "drizzle") });
+      ensureCurrentSchema(sqlite);
     } catch (error) {
       sqlite.close();
       throw error;
@@ -40,6 +41,19 @@ function getDb(): BetterSQLite3Database<typeof schema> {
     _db = database;
   }
   return _db;
+}
+
+function ensureCurrentSchema(sqlite: Database.Database): void {
+  const userSettingsColumns = sqlite.pragma("table_info(user_settings)") as Array<{
+    name: string;
+  }>;
+
+  if (
+    userSettingsColumns.length > 0 &&
+    !userSettingsColumns.some((column) => column.name === "model_context_window")
+  ) {
+    sqlite.exec("ALTER TABLE user_settings ADD COLUMN model_context_window integer");
+  }
 }
 
 export function resetDatabaseForTests(): void {
