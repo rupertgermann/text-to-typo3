@@ -15,6 +15,7 @@ interface MessageBubbleProps {
   message: UIMessage;
   allowEdit?: boolean;
   allowRegenerate?: boolean;
+  pendingApprovalToolCallIds?: ReadonlySet<string>;
   onEdit?: () => void;
   onRegenerate?: () => void;
   onToolApprovalResponse?: (response: {
@@ -61,6 +62,7 @@ function MessageBubbleComponent({
   message,
   allowEdit = true,
   allowRegenerate = false,
+  pendingApprovalToolCallIds,
   onEdit,
   onRegenerate,
   onToolApprovalResponse,
@@ -218,6 +220,7 @@ function MessageBubbleComponent({
               <ToolCallCard
                 key={part.toolCallId}
                 part={part as GenericToolPart}
+                isPendingApproval={pendingApprovalToolCallIds?.has(part.toolCallId)}
                 onApprovalResponse={onToolApprovalResponse}
               />
             );
@@ -248,8 +251,33 @@ function areMessageBubblePropsEqual(
   return (
     previous.allowEdit === next.allowEdit &&
     previous.allowRegenerate === next.allowRegenerate &&
+    areSetsEqual(
+      previous.pendingApprovalToolCallIds,
+      next.pendingApprovalToolCallIds,
+    ) &&
     areMessagesEqual(previous.message, next.message)
   );
+}
+
+function areSetsEqual(
+  previous: ReadonlySet<string> | undefined,
+  next: ReadonlySet<string> | undefined,
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+
+  if (!previous || !next || previous.size !== next.size) {
+    return false;
+  }
+
+  for (const value of previous) {
+    if (!next.has(value)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function areMessagesEqual(previous: UIMessage, next: UIMessage): boolean {
