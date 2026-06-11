@@ -103,9 +103,11 @@ export function createTextResponse({
 export async function startFakeOpenAICompatibleServer({
   chatResponses,
   models = [],
+  modelsStatus = 200,
 }: {
   chatResponses: FakeChatResponse[];
   models?: FakeModel[];
+  modelsStatus?: number;
 }): Promise<FakeOpenAICompatibleServer> {
   const chatRequests: unknown[] = [];
   const modelsRequests: unknown[] = [];
@@ -116,6 +118,11 @@ export async function startFakeOpenAICompatibleServer({
 
     if (request.method === "GET" && url.pathname === "/models") {
       modelsRequests.push({ headers: request.headers });
+      if (modelsStatus !== 200) {
+        response.writeHead(modelsStatus, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { message: `HTTP ${modelsStatus}` } }));
+        return;
+      }
       response.setHeader("Content-Type", "application/json");
       response.end(JSON.stringify({ data: models }));
       return;

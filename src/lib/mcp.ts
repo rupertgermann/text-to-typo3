@@ -44,6 +44,12 @@ type McpMethodResponse<T> = {
   sessionHeaderId: string | null;
 };
 
+export class McpHttpError extends Error {
+  constructor(public readonly status: number) {
+    super(`MCP request failed with status ${status}`);
+  }
+}
+
 const TOOL_CACHE_TTL_MS = 5 * 60 * 1000;
 const toolCache = new Map<string, CachedToolSet>();
 const mcpSessionCache = new Map<string, string>();
@@ -229,7 +235,7 @@ async function callMcpMethod<T>({
   );
 
   if (response.status < 200 || response.status >= 300) {
-    throw new Error(`MCP request failed with status ${response.status}`);
+    throw new McpHttpError(response.status);
   }
 
   const payload = JSON.parse(response.body) as JsonRpcSuccess<T> | JsonRpcError;
@@ -242,6 +248,17 @@ async function callMcpMethod<T>({
     result: payload.result,
     sessionHeaderId: response.headers.get("mcp-session-id"),
   };
+}
+
+export async function testMcpConnection(accessToken: string): Promise<number> {
+  const mcpSessionId = await initializeMcp(accessToken);
+  const listResponse = await callMcpMethod<McpToolListResult>({
+    accessToken,
+    method: "tools/list",
+    sessionHeaderId: mcpSessionId,
+  });
+
+  return listResponse.result.tools.length;
 }
 
 async function initializeMcp(accessToken: string): Promise<string | null> {

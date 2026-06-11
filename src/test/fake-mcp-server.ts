@@ -64,7 +64,9 @@ const defaultTools = [
   },
 ];
 
-export async function startFakeMcpServer(): Promise<FakeMcpServer> {
+export async function startFakeMcpServer(options?: {
+  statusByMethod?: Record<string, number>;
+}): Promise<FakeMcpServer> {
   const requests: JsonRpcRequest[] = [];
   const toolCalls: FakeMcpToolCall[] = [];
 
@@ -76,6 +78,21 @@ export async function startFakeMcpServer(): Promise<FakeMcpServer> {
 
     const payload = JSON.parse(await readRequestBody(request)) as JsonRpcRequest;
     requests.push(payload);
+    const status = payload.method
+      ? options?.statusByMethod?.[payload.method]
+      : undefined;
+
+    if (status) {
+      response.writeHead(status, { "Content-Type": "application/json" });
+      response.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: payload.id ?? null,
+          error: { code: status, message: `HTTP ${status}` },
+        }),
+      );
+      return;
+    }
 
     response.setHeader("Content-Type", "application/json");
     response.setHeader("Mcp-Session-Id", "fake-mcp-session");

@@ -2,9 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertCircle,
   ArrowRight,
   Check,
+  CheckCircle2,
   Loader2,
+  PlugZap,
   Settings as SettingsIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -29,6 +32,38 @@ interface SettingsModalProps {
 
 type RemoteModelCatalog = UserModelCatalog;
 const SETTINGS_UPDATED_EVENT = "text-to-typo3-settings-updated";
+
+type ConnectionStatus = {
+  tone: "success" | "error";
+  message: string;
+};
+
+type ConnectionResponse = {
+  ok: boolean;
+  error?: { message?: string };
+  modelCount?: number;
+  toolCount?: number;
+};
+
+function ConnectionResult({ status }: { status: ConnectionStatus | null }) {
+  if (!status) {
+    return null;
+  }
+
+  const Icon = status.tone === "success" ? CheckCircle2 : AlertCircle;
+
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-1.5 text-xs",
+        status.tone === "success" ? "text-emerald-600" : "text-destructive",
+      )}
+    >
+      <Icon className="h-3.5 w-3.5" />
+      <span>{status.message}</span>
+    </div>
+  );
+}
 
 function ModelCard({
   model,
@@ -97,6 +132,14 @@ export function SettingsModal({
   const [lmstudioBaseUrl, setLmstudioBaseUrl] = useState("");
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [selectedLmStudioModelId, setSelectedLmStudioModelId] = useState<string>("");
+  const [testingConnection, setTestingConnection] = useState<
+    "lmstudio" | "mcp" | "openai" | null
+  >(null);
+  const [lmstudioConnection, setLmstudioConnection] =
+    useState<ConnectionStatus | null>(null);
+  const [mcpConnection, setMcpConnection] = useState<ConnectionStatus | null>(null);
+  const [openaiConnection, setOpenaiConnection] =
+    useState<ConnectionStatus | null>(null);
 
   const openAiModels = useMemo(
     () => models.filter((model) => model.provider === "openai"),
@@ -221,6 +264,52 @@ export function SettingsModal({
     }
   }
 
+  async function testMcpConnection() {
+    setTestingConnection("mcp");
+    setMcpConnection(null);
+
+    try {
+      const response = await fetch("/api/settings/test-mcp", { method: "POST" });
+      const body: ConnectionResponse = await response.json();
+      setMcpConnection(formatConnectionStatus(body, "tool"));
+    } catch {
+      setMcpConnection({
+        tone: "error",
+        message: "Connection test failed",
+      });
+    } finally {
+      setTestingConnection(null);
+    }
+  }
+
+  async function testModelConnection(provider: "lmstudio" | "openai") {
+    setTestingConnection(provider);
+    const setStatus =
+      provider === "openai" ? setOpenaiConnection : setLmstudioConnection;
+    setStatus(null);
+
+    try {
+      const response = await fetch("/api/settings/test-model-provider", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider,
+          apiKey: provider === "openai" && openaiKey.trim() ? openaiKey.trim() : undefined,
+          baseUrl: provider === "lmstudio" ? lmstudioBaseUrl.trim() : undefined,
+        }),
+      });
+      const body: ConnectionResponse = await response.json();
+      setStatus(formatConnectionStatus(body, "model"));
+    } catch {
+      setStatus({
+        tone: "error",
+        message: "Connection test failed",
+      });
+    } finally {
+      setTestingConnection(null);
+    }
+  }
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger
@@ -256,14 +345,31 @@ export function SettingsModal({
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium">OpenAI API Key</label>
-                  <Input
-                    value={openaiKey}
-                    onChange={(event) => setOpenaiKey(event.target.value)}
-                    placeholder={
-                      settings?.hasOpenAIKey ? "Key configured" : "sk-..."
-                    }
-                    type="password"
-                  />
+                  <div className="flex gap-2">
+                    <Input
+                      value={openaiKey}
+                      onChange={(event) => setOpenaiKey(event.target.value)}
+                      placeholder={
+                        settings?.hasOpenAIKey ? "Key configured" : "sk-..."
+                      }
+                      type="password"
+                      className="flex-1"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => void testModelConnection("openai")}
+                      disabled={testingConnection === "openai"}
+                    >
+                      {testingConnection === "openai" ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <PlugZap className="h-4 w-4" />
+                      )}
+                      Test
+                    </Button>
+                  </div>
+                  <ConnectionResult status={openaiConnection} />
                 </div>
                 <div className="grid gap-2 md:grid-cols-2">
                   {openAiModels.length === 0 ? (
@@ -309,7 +415,21 @@ export function SettingsModal({
                   >
                     Fetch models
                   </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void testModelConnection("lmstudio")}
+                    disabled={testingConnection === "lmstudio"}
+                  >
+                    {testingConnection === "lmstudio" ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <PlugZap className="h-4 w-4" />
+                    )}
+                    Test
+                  </Button>
                 </div>
+                <ConnectionResult status={lmstudioConnection} />
                 <div className="grid gap-2 md:grid-cols-2">
                   {lmStudioModels.length === 0 ? (
                     <div className="rounded-xl border border-dashed p-3 text-sm text-muted-foreground">
@@ -357,15 +477,31 @@ export function SettingsModal({
                     </div>
                   </div>
                 </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => {
-                    window.location.assign("/api/auth/logout");
-                  }}
-                >
-                  Logout
-                </Button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void testMcpConnection()}
+                    disabled={testingConnection === "mcp"}
+                  >
+                    {testingConnection === "mcp" ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <PlugZap className="h-4 w-4" />
+                    )}
+                    Test MCP
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      window.location.assign("/api/auth/logout");
+                    }}
+                  >
+                    Logout
+                  </Button>
+                  <ConnectionResult status={mcpConnection} />
+                </div>
               </section>
 
               {error ? (
@@ -394,4 +530,23 @@ export function SettingsModal({
       </DialogContent>
     </Dialog>
   );
+}
+
+function formatConnectionStatus(
+  body: ConnectionResponse,
+  noun: "model" | "tool",
+): ConnectionStatus {
+  if (body.ok) {
+    const count = noun === "model" ? body.modelCount : body.toolCount;
+    const label = noun === "model" ? "model" : "tool";
+    return {
+      tone: "success",
+      message: `${count ?? 0} ${label}${count === 1 ? "" : "s"} found`,
+    };
+  }
+
+  return {
+    tone: "error",
+    message: body.error?.message ?? "Connection failed",
+  };
 }
