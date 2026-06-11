@@ -1,5 +1,5 @@
 import { type NextRequest } from "next/server";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { badRequest, notFound, withAuth } from "@/lib/api-route";
 import {
   deleteConversationForUser,
   getConversationWithMessagesForUser,
@@ -8,15 +8,11 @@ import {
 
 type RouteContext = { params: Promise<{ id: string }> };
 
-export async function GET(
+export const GET = withAuth<RouteContext>(async (
   _request: NextRequest,
-  { params }: RouteContext,
-) {
-  const auth = await getAuthenticatedUser();
-  if (!auth) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+  auth,
+  { params },
+) => {
   const { id } = await params;
 
   const conversation = await getConversationWithMessagesForUser(
@@ -25,49 +21,39 @@ export async function GET(
   );
 
   if (!conversation) {
-    return Response.json({ error: "Conversation not found" }, { status: 404 });
+    return notFound("Conversation not found");
   }
 
   return Response.json(conversation);
-}
+});
 
-export async function PATCH(
+export const PATCH = withAuth<RouteContext>(async (
   request: NextRequest,
-  { params }: RouteContext,
-) {
-  const auth = await getAuthenticatedUser();
-  if (!auth) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+  auth,
+  { params },
+) => {
   const { id } = await params;
 
   let body: { autoApproveWrites?: unknown; title?: unknown };
   try {
     body = await request.json();
   } catch {
-    return Response.json({ error: "Invalid request body" }, { status: 400 });
+    return badRequest("Invalid request body");
   }
 
   const hasTitle = body.title !== undefined;
   const hasAutoApproveWrites = body.autoApproveWrites !== undefined;
 
   if (!hasTitle && !hasAutoApproveWrites) {
-    return Response.json(
-      { error: "title or autoApproveWrites is required" },
-      { status: 400 },
-    );
+    return badRequest("title or autoApproveWrites is required");
   }
 
   if (hasTitle && (typeof body.title !== "string" || !body.title.trim())) {
-    return Response.json({ error: "title is required" }, { status: 400 });
+    return badRequest("title is required");
   }
 
   if (hasAutoApproveWrites && typeof body.autoApproveWrites !== "boolean") {
-    return Response.json(
-      { error: "autoApproveWrites must be a boolean" },
-      { status: 400 },
-    );
+    return badRequest("autoApproveWrites must be a boolean");
   }
 
   const updated = await updateConversationForUser(auth.user.id, id, {
@@ -78,27 +64,23 @@ export async function PATCH(
   });
 
   if (!updated) {
-    return Response.json({ error: "Conversation not found" }, { status: 404 });
+    return notFound("Conversation not found");
   }
 
   return Response.json(updated);
-}
+});
 
-export async function DELETE(
+export const DELETE = withAuth<RouteContext>(async (
   _request: NextRequest,
-  { params }: RouteContext,
-) {
-  const auth = await getAuthenticatedUser();
-  if (!auth) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+  auth,
+  { params },
+) => {
   const { id } = await params;
 
   const deleted = await deleteConversationForUser(auth.user.id, id);
   if (!deleted) {
-    return Response.json({ error: "Conversation not found" }, { status: 404 });
+    return notFound("Conversation not found");
   }
 
   return new Response(null, { status: 204 });
-}
+});

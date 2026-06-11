@@ -12,7 +12,7 @@ import {
 import { createOpenAI } from "@ai-sdk/openai";
 import { db } from "@/lib/db";
 import { conversations, messages } from "@/lib/db/schema";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { badRequest, notFound, upstreamError, withAuth } from "@/lib/api-route";
 import { getEnv } from "@/lib/env";
 import {
   getMcpTools,
@@ -157,12 +157,7 @@ function hasApprovalResponseParts(message: UIMessage): boolean {
   );
 }
 
-export async function POST(request: NextRequest) {
-  // Validate session
-  const auth = await getAuthenticatedUser();
-  if (!auth) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
+export const POST = withAuth(async (request: NextRequest, auth) => {
   const userId = auth.user.id;
 
   let body: {
@@ -174,7 +169,7 @@ export async function POST(request: NextRequest) {
   try {
     body = await request.json();
   } catch {
-    return Response.json({ error: "Invalid request body" }, { status: 400 });
+    return badRequest("Invalid request body");
   }
 
   const { messages: incomingMessages, conversationId } = body;
@@ -187,11 +182,11 @@ export async function POST(request: NextRequest) {
   let continuationAssistantMessageId: string | null = null;
 
   if (!conversationId || typeof conversationId !== "string") {
-    return Response.json({ error: "conversationId is required" }, { status: 400 });
+    return badRequest("conversationId is required");
   }
 
   if (!Array.isArray(incomingMessages) || incomingMessages.length === 0) {
-    return Response.json({ error: "messages array is required" }, { status: 400 });
+    return badRequest("messages array is required");
   }
 
   // Validate the conversation belongs to the authenticated user
@@ -203,7 +198,7 @@ export async function POST(request: NextRequest) {
   });
 
   if (!conversation) {
-    return Response.json({ error: "Conversation not found" }, { status: 404 });
+    return notFound("Conversation not found");
   }
 
   const uiMessages = incomingMessages as UIMessage[];
@@ -228,10 +223,7 @@ export async function POST(request: NextRequest) {
       targetAssistantIndex !== existingMessages.length - 1 ||
       existingMessages[targetAssistantIndex]?.role !== "assistant"
     ) {
-      return Response.json(
-        { error: "Only the latest assistant message can be regenerated" },
-        { status: 400 },
-      );
+      return badRequest("Only the latest assistant message can be regenerated");
     }
 
     const precedingUserMessage = existingMessages
@@ -239,10 +231,7 @@ export async function POST(request: NextRequest) {
       .findLast((message) => message.role === "user");
 
     if (!precedingUserMessage) {
-      return Response.json(
-        { error: "No user message found to regenerate from" },
-        { status: 400 },
-      );
+      return badRequest("No user message found to regenerate from");
     }
 
     userText = precedingUserMessage.content;
@@ -261,17 +250,14 @@ export async function POST(request: NextRequest) {
     );
 
     if (currentMessageIndex === -1) {
-      return Response.json({ error: "Message not found" }, { status: 404 });
+      return notFound("Message not found");
     }
 
     if (
       currentMessageIndex !== existingMessages.length - 1 ||
       existingMessages[currentMessageIndex]?.role !== "assistant"
     ) {
-      return Response.json(
-        { error: "Only the latest assistant approval can be continued" },
-        { status: 400 },
-      );
+      return badRequest("Only the latest assistant approval can be continued");
     }
 
     const precedingUserMessage = existingMessages
@@ -279,10 +265,7 @@ export async function POST(request: NextRequest) {
       .findLast((message) => message.role === "user");
 
     if (!precedingUserMessage) {
-      return Response.json(
-        { error: "No user message found for approval continuation" },
-        { status: 400 },
-      );
+      return badRequest("No user message found for approval continuation");
     }
 
     userText = precedingUserMessage.content;
@@ -303,12 +286,8 @@ export async function POST(request: NextRequest) {
       lastMessage.role !== "user" ||
       (!userText.trim() && !hasFileParts(lastMessage.parts))
     ) {
-      return Response.json(
-        {
-          error:
-            "Last message must be a user message with text or file content",
-        },
-        { status: 400 },
+      return badRequest(
+        "Last message must be a user message with text or file content",
       );
     }
 
@@ -325,14 +304,11 @@ export async function POST(request: NextRequest) {
       );
 
       if (currentMessageIndex === -1) {
-        return Response.json({ error: "Message not found" }, { status: 404 });
+        return notFound("Message not found");
       }
 
       if (existingMessages[currentMessageIndex]?.role !== "user") {
-        return Response.json(
-          { error: "Only user messages can be edited" },
-          { status: 400 },
-        );
+        return badRequest("Only user messages can be edited");
       }
 
       const trailingMessageIds = existingMessages
@@ -394,10 +370,7 @@ export async function POST(request: NextRequest) {
   );
 
   if (parsedCustomModel && !selectedCustomProvider) {
-    return Response.json(
-      { error: "The selected custom provider is no longer configured." },
-      { status: 400 },
-    );
+    return badRequest("The selected custom provider is no longer configured.");
   }
 
   const useCustomProvider = Boolean(selectedCustomProvider);
@@ -416,10 +389,7 @@ export async function POST(request: NextRequest) {
     userSettings.openAiApiKey || env.OPENAI_API_KEY || process.env.OPENAI_API_KEY;
 
   if (!useLmStudio && !useCustomProvider && !openAiApiKey) {
-    return Response.json(
-      { error: "Missing OpenAI API key. Add one in settings or .env.local." },
-      { status: 400 },
-    );
+    return badRequest("Missing OpenAI API key. Add one in settings or .env.local.");
   }
 
   const provider = createOpenAI({
@@ -469,10 +439,7 @@ export async function POST(request: NextRequest) {
         });
     }
   } catch (error) {
-    return Response.json(
-      { error: getChatErrorMessage(error, "mcp") },
-      { status: 502 },
-    );
+    return upstreamError(getChatErrorMessage(error, "mcp"));
   }
 
   const isChatCompletionsPath = useLmStudio || useCustomProvider;
@@ -552,4 +519,4 @@ export async function POST(request: NextRequest) {
         .where(eq(conversations.id, conversationId));
     },
   });
-}
+});

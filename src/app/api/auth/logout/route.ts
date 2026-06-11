@@ -4,9 +4,10 @@ import { db } from "@/lib/db";
 import { sessions } from "@/lib/db/schema";
 import { revokeSessionTokens } from "@/lib/auth";
 import { getSession } from "@/lib/session";
+import { withApiRoute } from "@/lib/api-route";
 import { getEnv } from "@/lib/env";
 
-export async function GET(request: NextRequest) {
+export const GET = withApiRoute(async (request: NextRequest) => {
   const env = getEnv();
   const appOrigin = new URL(request.url).origin;
 
@@ -30,4 +31,4 @@ export async function GET(request: NextRequest) {
   session.destroy();
 
   return NextResponse.redirect(new URL("/api/auth/login", appOrigin));
-}
+});

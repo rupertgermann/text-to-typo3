@@ -1,11 +1,6 @@
-import { getAuthenticatedUser } from "@/lib/auth";
+import { withAuth } from "@/lib/api-route";
 import { runMcpConnectionTest } from "@/lib/connection-tests";
 
-export async function POST() {
-  const auth = await getAuthenticatedUser();
-  if (!auth) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+export const POST = withAuth(async (_request, auth) => {
   return Response.json(await runMcpConnectionTest(auth.accessToken));
-}
+});

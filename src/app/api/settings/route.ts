@@ -1,5 +1,5 @@
 import { type NextRequest } from "next/server";
-import { getAuthenticatedUser } from "@/lib/auth";
+import { badRequest, withAuth } from "@/lib/api-route";
 import {
   type CustomProviderInput,
   getPublicUserSettings,
@@ -80,27 +80,17 @@ function asCustomProviders(
   });
 }
 
-export async function GET() {
-  const auth = await getAuthenticatedUser();
-  if (!auth) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+export const GET = withAuth(async (_request: NextRequest, auth) => {
   const settings = await getPublicUserSettings(auth.user.id);
   return Response.json(settings);
-}
+});
 
-export async function PATCH(request: NextRequest) {
-  const auth = await getAuthenticatedUser();
-  if (!auth) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
+export const PATCH = withAuth(async (request: NextRequest, auth) => {
   let body: SettingsBody;
   try {
     body = await request.json();
   } catch {
-    return Response.json({ error: "Invalid request body" }, { status: 400 });
+    return badRequest("Invalid request body");
   }
 
   let updated;
@@ -139,11 +129,11 @@ export async function PATCH(request: NextRequest) {
     }
   } catch (error) {
     if (error instanceof UserSettingsValidationError) {
-      return Response.json({ error: error.message }, { status: 400 });
+      return badRequest(error.message);
     }
 
     throw error;
   }
 
   return Response.json(updated);
-}
+});

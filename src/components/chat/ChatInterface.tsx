@@ -35,6 +35,7 @@ import {
   deserializeMessageParts,
   extractMessageText,
 } from "@/lib/chat-message-parts";
+import { readApiErrorMessage } from "@/lib/api-client";
 import {
   starterPrompts,
   type StarterPromptCategory,
@@ -284,7 +285,12 @@ export function ChatInterface({
       });
 
       if (!response.ok) {
-        throw new Error("Failed to update auto-approve setting");
+        throw new Error(
+          await readApiErrorMessage(
+            response,
+            "Failed to update auto-approve setting",
+          ),
+        );
       }
 
       const updated = await response.json() as {

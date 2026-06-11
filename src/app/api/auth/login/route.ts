@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { randomBytes, createHash } from "node:crypto";
 import { cookies } from "next/headers";
+import { withApiRoute } from "@/lib/api-route";
 import { getEnv } from "@/lib/env";
 
-export async function GET() {
+export const GET = withApiRoute(async () => {
   const env = getEnv();
 
   if (
@@ -55,4 +56,4 @@ export async function GET() {
   authorizeUrl.searchParams.set("code_challenge_method", "S256");
 
   return NextResponse.redirect(authorizeUrl.toString());
-}
+});

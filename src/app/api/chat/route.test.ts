@@ -427,7 +427,10 @@ describe("chat route integration", () => {
     const body = await response.json();
 
     expect(response.status).toBe(502);
-    expect(body.error).toBe("TYPO3 MCP authentication failed. Check the configured token.");
+    expect(body.error).toEqual({
+      code: "upstream_error",
+      message: "TYPO3 MCP authentication failed. Check the configured token.",
+    });
     expect(JSON.stringify(body)).not.toContain("test-mcp-token");
   });
 
@@ -452,7 +455,10 @@ describe("chat route integration", () => {
 
     expect(Date.now() - startedAt).toBeLessThan(6_500);
     expect(response.status).toBe(502);
-    expect(body.error).toBe("TYPO3 MCP endpoint unreachable. Check Settings.");
+    expect(body.error).toEqual({
+      code: "upstream_error",
+      message: "TYPO3 MCP endpoint unreachable. Check Settings.",
+    });
     expect(fakeModel.chatRequests).toHaveLength(0);
   }, 10_000);
 
