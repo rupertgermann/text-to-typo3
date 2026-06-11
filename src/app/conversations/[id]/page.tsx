@@ -11,6 +11,7 @@ import { SettingsModal } from "@/components/settings/settings-modal";
 import { ModelPickerDropdown } from "@/components/settings/model-picker-dropdown";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { getEnv } from "@/lib/env";
+import { formatTokenUsage, sumTokenUsage } from "@/lib/token-usage";
 
 interface ConversationPageProps {
   params: Promise<{ id: string }>;
@@ -42,6 +43,14 @@ export default async function ConversationPage({
     where: eq(messages.conversation_id, id),
     orderBy: [asc(messages.created_at)],
   });
+  const conversationUsage = sumTokenUsage(
+    initialMessages
+      .filter((message) => message.role === "assistant")
+      .map((message) => ({
+        inputTokens: message.input_tokens,
+        outputTokens: message.output_tokens,
+      })),
+  );
 
   const initials = user.display_name
     .split(" ")
@@ -61,7 +70,9 @@ export default async function ConversationPage({
             <h1 className="truncate text-xl font-semibold tracking-tight">
               {conversation.title}
             </h1>
-            <p className="text-sm text-muted-foreground">Conversation workspace</p>
+            <p className="text-sm text-muted-foreground">
+              Conversation workspace · {formatTokenUsage(conversationUsage)}
+            </p>
           </div>
           <div className="flex items-center gap-2 md:gap-3">
             <div className="hidden items-center gap-2 rounded-full border border-border/70 bg-card/80 px-2.5 py-1.5 md:flex">

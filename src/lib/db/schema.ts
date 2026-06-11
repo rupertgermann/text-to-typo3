@@ -57,6 +57,8 @@ export const messages = sqliteTable("messages", {
   role: text("role").notNull(),
   content: text("content").notNull(),
   tool_calls: text("tool_calls"),
+  input_tokens: integer("input_tokens"),
+  output_tokens: integer("output_tokens"),
   created_at: integer("created_at")
     .notNull()
     .default(sql`(unixepoch())`),

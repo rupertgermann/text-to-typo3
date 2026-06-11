@@ -34,12 +34,33 @@ function normalizeModelId(id: string): string {
   return id.trim();
 }
 
-function isAllowedOpenAIModelId(id: string): boolean {
+function isOpenAIChatModelId(id: string): boolean {
   const normalized = id.trim().toLowerCase();
-  return /^gpt-5\.4(?:-(?:mini|nano|nao))?$/.test(normalized);
+
+  if (!normalized) {
+    return false;
+  }
+
+  const excludedFamilies = [
+    "audio",
+    "dall-e",
+    "embedding",
+    "image",
+    "moderation",
+    "realtime",
+    "speech",
+    "tts",
+    "whisper",
+  ];
+
+  if (excludedFamilies.some((family) => normalized.includes(family))) {
+    return false;
+  }
+
+  return /^(?:gpt|chatgpt|o\d)/.test(normalized);
 }
 
-function estimateContextWindow(id: string): number | null {
+export function getModelContextWindowHint(id: string): number | null {
   const normalized = id.toLowerCase();
 
   const hints: Array<[RegExp, number]> = [
@@ -100,12 +121,12 @@ export async function listOpenAIModels(
     return rawModels
       .map((entry) => entry.id?.trim())
       .filter((id): id is string => typeof id === "string" && id.length > 0)
-      .filter((id) => isAllowedOpenAIModelId(id))
+      .filter((id) => isOpenAIChatModelId(id))
       .map((id) => ({
         id: normalizeModelId(id),
         name: buildDisplayName(id),
         provider: "openai" as const,
-        contextWindow: estimateContextWindow(id),
+        contextWindow: getModelContextWindowHint(id),
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
   } catch {
@@ -140,7 +161,7 @@ export async function listLmStudioModels(
           contextWindow:
             entry.context_length ??
             entry.max_context_length ??
-            estimateContextWindow(id),
+            getModelContextWindowHint(id),
           baseUrl: normalizedBaseUrl,
         };
       })

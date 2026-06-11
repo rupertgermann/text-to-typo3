@@ -8,20 +8,29 @@ import { MessageBubble } from "./MessageBubble";
 import type { Message } from "@/lib/db/schema";
 import { ActivitySidebar } from "./ActivitySidebar";
 import {
+  FilePlus2,
   ImagePlus,
+  Languages,
   Loader2,
+  Newspaper,
   Paperclip,
   PanelRight,
   Pencil,
+  Search,
   Send,
   Square,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   deserializeMessageParts,
   extractMessageText,
 } from "@/lib/chat-message-parts";
+import {
+  starterPrompts,
+  type StarterPromptCategory,
+} from "@/lib/starter-prompts";
 
 interface ChatInterfaceProps {
   conversationId: string;
@@ -30,6 +39,13 @@ interface ChatInterfaceProps {
 
 type PendingAttachment = {
   file: File;
+};
+
+const starterPromptIcons: Record<StarterPromptCategory, LucideIcon> = {
+  inspection: Search,
+  content: FilePlus2,
+  news: Newspaper,
+  translation: Languages,
 };
 
 /** Convert DB messages to UIMessage format. Only user/assistant/system roles are included. */
@@ -42,6 +58,8 @@ function toUIMessages(dbMessages: Message[]): UIMessage[] {
       role: m.role as UIMessage["role"],
       metadata: {
         createdAt: m.created_at,
+        inputTokens: m.input_tokens,
+        outputTokens: m.output_tokens,
       },
       parts:
         deserializeMessageParts(m.tool_calls) ??
@@ -84,7 +102,7 @@ export function ChatInterface({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const { messages, status, error, sendMessage, stop } = useChat({
+  const { messages, status, error, sendMessage, regenerate, stop } = useChat({
     messages: toUIMessages(initialMessages),
     transport: new DefaultChatTransport({
       body: { conversationId },
@@ -92,6 +110,7 @@ export function ChatInterface({
   });
 
   const isLoading = status === "submitted" || status === "streaming";
+  const lastTranscriptMessage = messages[messages.length - 1];
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -176,6 +195,13 @@ export function ChatInterface({
     queueMicrotask(() => textareaRef.current?.focus());
   };
 
+  const selectStarterPrompt = (prompt: string) => {
+    setEditingMessageId(null);
+    setInput(prompt);
+    setComposerError(null);
+    queueMicrotask(() => textareaRef.current?.focus());
+  };
+
   const removeAttachment = (index: number) => {
     setAttachments((current) => {
       const next = current.filter((_, currentIndex) => currentIndex !== index);
@@ -224,13 +250,42 @@ export function ChatInterface({
         <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8">
           <div className="mx-auto max-w-4xl space-y-5">
             {messages.length === 0 ? (
-              <div className="flex min-h-[420px] flex-col items-center justify-center rounded-[2rem] border border-dashed border-border/70 bg-card/50 px-8 text-center text-muted-foreground shadow-sm">
-                <p className="text-lg font-medium text-foreground">
-                  What would you like to know about your TYPO3 instance?
-                </p>
-                <p className="mt-2 max-w-xl text-sm leading-6">
-                  Ask anything - pages, content, settings, or configuration.
-                </p>
+              <div className="mx-auto flex min-h-[420px] w-full max-w-3xl flex-col justify-center py-6">
+                <div className="text-center">
+                  <p className="text-lg font-medium text-foreground">
+                    What would you like to do in TYPO3?
+                  </p>
+                  <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                    Start with a common task and adjust the prompt before sending.
+                  </p>
+                </div>
+
+                <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                  {starterPrompts.map((starterPrompt) => {
+                    const Icon = starterPromptIcons[starterPrompt.category];
+
+                    return (
+                      <button
+                        key={starterPrompt.id}
+                        type="button"
+                        disabled={isLoading}
+                        className="group flex min-h-36 flex-col rounded-lg border border-border bg-card/80 p-4 text-left shadow-sm transition-colors hover:border-primary/50 hover:bg-card focus-visible:border-ring focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={() => selectStarterPrompt(starterPrompt.prompt)}
+                      >
+                        <span className="flex items-center gap-2 text-sm font-medium text-foreground">
+                          <Icon className="h-4 w-4 text-primary" />
+                          {starterPrompt.title}
+                        </span>
+                        <span className="mt-2 text-sm leading-5 text-muted-foreground">
+                          {starterPrompt.description}
+                        </span>
+                        <span className="mt-4 text-xs leading-5 text-muted-foreground/80">
+                          {starterPrompt.prompt}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             ) : (
               messages.map((message) => (
@@ -238,8 +293,18 @@ export function ChatInterface({
                   key={message.id}
                   message={message}
                   allowEdit={!isLoading}
+                  allowRegenerate={
+                    !isLoading &&
+                    message.role === "assistant" &&
+                    lastTranscriptMessage?.id === message.id
+                  }
                   onEdit={
                     message.role === "user" ? () => startEditing(message) : undefined
+                  }
+                  onRegenerate={
+                    message.role === "assistant"
+                      ? () => regenerate({ messageId: message.id })
+                      : undefined
                   }
                 />
               ))

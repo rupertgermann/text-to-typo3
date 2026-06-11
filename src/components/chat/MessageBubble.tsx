@@ -3,23 +3,28 @@
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { isFileUIPart, isToolUIPart, type UIMessage } from "ai";
-import { Check, Copy, Pencil } from "lucide-react";
+import { Check, Copy, Pencil, RotateCcw } from "lucide-react";
 import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ToolCallCard, type GenericToolPart } from "./ToolCallCard";
 import { extractMessageText } from "@/lib/chat-message-parts";
+import { formatTokenUsage } from "@/lib/token-usage";
 
 interface MessageBubbleProps {
   message: UIMessage;
   allowEdit?: boolean;
+  allowRegenerate?: boolean;
   onEdit?: () => void;
+  onRegenerate?: () => void;
 }
 
 export function MessageBubble({
   message,
   allowEdit = true,
+  allowRegenerate = false,
   onEdit,
+  onRegenerate,
 }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
@@ -32,6 +37,23 @@ export function MessageBubble({
       ? new Date(message.metadata.createdAt * 1000)
       : null;
   const formattedCreatedAt = createdAt ? createdAt.toLocaleString() : null;
+  const inputTokens =
+    typeof message.metadata === "object" &&
+    message.metadata &&
+    "inputTokens" in message.metadata &&
+    typeof message.metadata.inputTokens === "number"
+      ? message.metadata.inputTokens
+      : null;
+  const outputTokens =
+    typeof message.metadata === "object" &&
+    message.metadata &&
+    "outputTokens" in message.metadata &&
+    typeof message.metadata.outputTokens === "number"
+      ? message.metadata.outputTokens
+      : null;
+  const tokenUsageLabel = !isUser
+    ? formatTokenUsage({ inputTokens, outputTokens })
+    : null;
 
   async function handleCopy() {
     try {
@@ -75,6 +97,18 @@ export function MessageBubble({
                 title="Edit message"
               >
                 <Pencil className="h-3.5 w-3.5" />
+              </Button>
+            ) : null}
+            {!isUser && onRegenerate ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                onClick={onRegenerate}
+                disabled={!allowRegenerate}
+                title="Regenerate response"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
               </Button>
             ) : null}
             <Button
@@ -175,6 +209,12 @@ export function MessageBubble({
 
           return null;
         })}
+
+        {tokenUsageLabel ? (
+          <div className="border-t border-border/60 pt-2 text-[11px] text-muted-foreground">
+            {tokenUsageLabel}
+          </div>
+        ) : null}
       </div>
     </div>
   );
