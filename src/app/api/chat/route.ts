@@ -1,6 +1,13 @@
 import { type NextRequest } from "next/server";
 import { eq, and, asc, inArray } from "drizzle-orm";
-import { stepCountIs, streamText, convertToModelMessages, type UIMessage } from "ai";
+import {
+  generateText,
+  stepCountIs,
+  streamText,
+  convertToModelMessages,
+  type LanguageModel,
+  type UIMessage,
+} from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { db } from "@/lib/db";
 import { conversations, messages } from "@/lib/db/schema";
@@ -39,6 +46,61 @@ function getConversationTitle(text: string): string {
     .split(/\s+/)
     .slice(0, 6)
     .join(" ");
+}
+
+function sanitizeGeneratedTitle(text: string): string | null {
+  const title = text
+    .split(/\r?\n/)
+    .at(0)
+    ?.replace(/^["'“”‘’]+|["'“”‘’]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80)
+    .trim();
+
+  return title || null;
+}
+
+async function updateGeneratedConversationTitle({
+  assistantText,
+  conversationId,
+  fallbackTitle,
+  model,
+  userText,
+}: {
+  assistantText: string;
+  conversationId: string;
+  fallbackTitle: string;
+  model: LanguageModel;
+  userText: string;
+}) {
+  try {
+    const result = await generateText({
+      model,
+      system:
+        "Write a concise, single-line conversation title. Return only the title.",
+      prompt: [
+        `User: ${userText}`,
+        `Assistant: ${assistantText}`,
+        "Title:",
+      ].join("\n"),
+    });
+    const generatedTitle = sanitizeGeneratedTitle(result.text);
+
+    if (!generatedTitle) {
+      return;
+    }
+
+    await db
+      .update(conversations)
+      .set({
+        title: generatedTitle,
+        updated_at: Math.floor(Date.now() / 1000),
+      })
+      .where(and(eq(conversations.id, conversationId), eq(conversations.title, fallbackTitle)));
+  } catch {
+    // The first-words fallback is already persisted; titling must never break chat.
+  }
 }
 
 function supportsBuiltInMcpTool(modelId: string): boolean {
@@ -274,8 +336,9 @@ export async function POST(request: NextRequest) {
         accessToken: auth.accessToken,
       });
 
+  const model = useLmStudio ? provider.chat(modelId) : provider.responses(modelId);
   const result = streamText({
-    model: useLmStudio ? provider.chat(modelId) : provider.responses(modelId),
+    model,
     system: [SYSTEM_PROMPT, env.TYPO3_MCP_SYSTEM_PROMPT].filter(Boolean).join("\n\n"),
     messages: budgetedModelMessages,
     stopWhen: stepCountIs(maxSteps),
@@ -310,13 +373,22 @@ export async function POST(request: NextRequest) {
       }
 
       if (/^new conversation$/i.test(conversation.title) && userText.trim()) {
+        const fallbackTitle = getConversationTitle(userText);
         await db
           .update(conversations)
           .set({
-            title: getConversationTitle(userText),
+            title: fallbackTitle,
             updated_at: Math.floor(Date.now() / 1000),
           })
           .where(eq(conversations.id, conversationId));
+
+        void updateGeneratedConversationTitle({
+          assistantText,
+          conversationId,
+          fallbackTitle,
+          model,
+          userText,
+        });
         return;
       }
 

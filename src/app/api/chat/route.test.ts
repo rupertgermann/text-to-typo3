@@ -294,16 +294,101 @@ describe("chat route integration", () => {
     expect(assistantMessages).toHaveLength(1);
     expect(assistantMessages[0]?.content).toBe("Regenerated answer.");
   });
+
+  it("replaces the default first-words title with a generated title after the first exchange", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({
+      chatResponses: [
+        createTextResponse({ text: "I can help with that." }),
+        createTextResponse({ text: "TYPO3 Landing Page Work" }),
+      ],
+      models: [{ id: "fake-typo3-model", context_length: 4096 }],
+    });
+    await seedTokenModeConversation({
+      conversationId: "conversation-title",
+      fakeMcpUrl: fakeMcp.url,
+      fakeModelUrl: fakeModel.url,
+    });
+
+    const response = await postChat({
+      conversationId: "conversation-title",
+      text: "Create a landing page draft",
+    });
+
+    expect(response.status).toBe(200);
+    await response.text();
+
+    await expectConversationTitle(
+      "conversation-title",
+      "TYPO3 Landing Page Work",
+    );
+  });
+
+  it("keeps the first-words fallback when title generation fails", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({
+      chatResponses: [createTextResponse({ text: "I can help with that." })],
+      models: [{ id: "fake-typo3-model", context_length: 4096 }],
+    });
+    await seedTokenModeConversation({
+      conversationId: "conversation-title-fallback",
+      fakeMcpUrl: fakeMcp.url,
+      fakeModelUrl: fakeModel.url,
+    });
+
+    const response = await postChat({
+      conversationId: "conversation-title-fallback",
+      text: "Create a landing page draft with teaser copy",
+    });
+
+    expect(response.status).toBe(200);
+    await response.text();
+
+    await expectConversationTitle(
+      "conversation-title-fallback",
+      "Create a landing page draft with",
+    );
+  });
+
+  it("does not generate a title for an already renamed conversation", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({
+      chatResponses: [
+        createTextResponse({ text: "I can help with that." }),
+        createTextResponse({ text: "Should Not Be Used" }),
+      ],
+      models: [{ id: "fake-typo3-model", context_length: 4096 }],
+    });
+    await seedTokenModeConversation({
+      conversationId: "conversation-renamed",
+      fakeMcpUrl: fakeMcp.url,
+      fakeModelUrl: fakeModel.url,
+      title: "Editorial Planning",
+    });
+
+    const response = await postChat({
+      conversationId: "conversation-renamed",
+      text: "Create a landing page draft",
+    });
+
+    expect(response.status).toBe(200);
+    await response.text();
+
+    await expectConversationTitle("conversation-renamed", "Editorial Planning");
+    expect(fakeModel.chatRequests).toHaveLength(1);
+  });
 });
 
 async function seedTokenModeConversation({
   conversationId,
   fakeMcpUrl,
   fakeModelUrl,
+  title = "New conversation",
 }: {
   conversationId: string;
   fakeMcpUrl: string;
   fakeModelUrl: string;
+  title?: string;
 }) {
   vi.stubEnv("TYPO3_BASE_URL", "https://typo3.example.test");
   vi.stubEnv("TYPO3_MCP_URL", fakeMcpUrl);
@@ -317,7 +402,7 @@ async function seedTokenModeConversation({
   await db.insert(conversations).values({
     id: conversationId,
     user_id: LOCAL_USER_ID,
-    title: "New conversation",
+    title,
   });
   await db.insert(userSettings).values({
     user_id: LOCAL_USER_ID,
@@ -359,4 +444,29 @@ async function latestAssistantMessage(conversationId: string) {
   });
 
   return rows.findLast((message) => message.role === "assistant") ?? null;
+}
+
+async function expectConversationTitle(
+  conversationId: string,
+  expectedTitle: string,
+) {
+  const deadline = Date.now() + 1000;
+
+  while (Date.now() < deadline) {
+    const conversation = await db.query.conversations.findFirst({
+      where: eq(conversations.id, conversationId),
+    });
+
+    if (conversation?.title === expectedTitle) {
+      expect(conversation.title).toBe(expectedTitle);
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  const conversation = await db.query.conversations.findFirst({
+    where: eq(conversations.id, conversationId),
+  });
+  expect(conversation?.title).toBe(expectedTitle);
 }

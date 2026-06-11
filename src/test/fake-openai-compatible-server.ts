@@ -122,12 +122,21 @@ export async function startFakeOpenAICompatibleServer({
     }
 
     if (request.method === "POST" && url.pathname === "/chat/completions") {
-      chatRequests.push(JSON.parse(await readRequestBody(request)));
+      const chatRequest = JSON.parse(await readRequestBody(request)) as {
+        stream?: boolean;
+      };
+      chatRequests.push(chatRequest);
       const scriptedResponse = chatResponses[chatResponseIndex++];
 
       if (!scriptedResponse) {
         response.writeHead(500, { "Content-Type": "application/json" });
         response.end(JSON.stringify({ error: { message: "No scripted response" } }));
+        return;
+      }
+
+      if (chatRequest.stream !== true) {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify(toChatCompletion(scriptedResponse)));
         return;
       }
 
@@ -170,6 +179,45 @@ function chatChunk(extra: Record<string, unknown>): Record<string, unknown> {
     model: "fake-typo3-model",
     ...extra,
   };
+}
+
+function toChatCompletion(response: FakeChatResponse): Record<string, unknown> {
+  return {
+    id: `chatcmpl-${crypto.randomUUID()}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model: "fake-typo3-model",
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: extractText(response),
+        },
+        finish_reason: "stop",
+      },
+    ],
+    usage: extractUsage(response),
+  };
+}
+
+function extractText(response: FakeChatResponse): string {
+  return response.chunks
+    .flatMap((chunk) => {
+      const choices = (chunk as { choices?: Array<{ delta?: { content?: unknown } }> })
+        .choices;
+      return choices?.map((choice) => choice.delta?.content) ?? [];
+    })
+    .filter((content): content is string => typeof content === "string")
+    .join("");
+}
+
+function extractUsage(response: FakeChatResponse): unknown {
+  return (
+    response.chunks.find(
+      (chunk) => typeof (chunk as { usage?: unknown }).usage === "object",
+    ) as { usage?: unknown } | undefined
+  )?.usage ?? null;
 }
 
 function readRequestBody(request: http.IncomingMessage): Promise<string> {
