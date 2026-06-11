@@ -11,7 +11,8 @@ import { SettingsModal } from "@/components/settings/settings-modal";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { getEnv } from "@/lib/env";
 import { getSelectedModelSummary } from "@/lib/models";
-import { formatTokenUsage, sumTokenUsage } from "@/lib/token-usage";
+import { formatTokenUsage } from "@/lib/token-usage";
+import { getAssistantTokenUsage } from "@/lib/conversations";
 import { getPublicUserSettings } from "@/lib/user-settings";
 
 interface ConversationPageProps {
@@ -44,14 +45,7 @@ export default async function ConversationPage({
     where: eq(messages.conversation_id, id),
     orderBy: [asc(messages.created_at)],
   });
-  const conversationUsage = sumTokenUsage(
-    initialMessages
-      .filter((message) => message.role === "assistant")
-      .map((message) => ({
-        inputTokens: message.input_tokens,
-        outputTokens: message.output_tokens,
-      })),
-  );
+  const conversationUsage = await getAssistantTokenUsage(id);
 
   const initials = user.display_name
     .split(" ")
