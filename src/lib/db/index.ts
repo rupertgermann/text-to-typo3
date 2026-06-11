@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import * as schema from "./schema";
 import path from "node:path";
 import fs from "node:fs";
@@ -26,8 +27,17 @@ function getDb(): BetterSQLite3Database<typeof schema> {
     const sqlite = new Database(databasePath);
     sqlite.pragma("journal_mode = WAL");
     sqlite.pragma("foreign_keys = ON");
+
+    const database = drizzle(sqlite, { schema });
+    try {
+      migrate(database, { migrationsFolder: path.join(process.cwd(), "drizzle") });
+    } catch (error) {
+      sqlite.close();
+      throw error;
+    }
+
     _sqlite = sqlite;
-    _db = drizzle(sqlite, { schema });
+    _db = database;
   }
   return _db;
 }
