@@ -405,7 +405,7 @@ export function SettingsModal({
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger
         render={
-          <Button variant="outline" size="sm" className="gap-2">
+          <Button variant="outline" size="sm" className="h-9 gap-2">
             <SettingsIcon className="h-4 w-4" />
             Settings
           </Button>

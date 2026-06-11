@@ -63,8 +63,8 @@ export default async function ConversationPage({
             </p>
           </div>
           <div className="flex items-center gap-2 md:gap-3">
-            <div className="hidden items-center gap-2 rounded-full border border-border/70 bg-card/80 px-2.5 py-1.5 md:flex">
-              <Avatar className="h-8 w-8">
+            <div className="hidden h-9 items-center gap-2 rounded-full border border-border/70 bg-card/80 px-2.5 text-sm md:flex">
+              <Avatar className="h-6 w-6">
                 <AvatarFallback className="text-xs">{initials}</AvatarFallback>
               </Avatar>
               <span className="text-sm text-muted-foreground">
@@ -73,7 +73,7 @@ export default async function ConversationPage({
             </div>
             <ThemeToggle />
             <div
-              className="hidden max-w-72 items-center gap-2 rounded-full border border-border/70 bg-card/80 px-3 py-1.5 text-sm md:flex"
+              className="hidden h-9 max-w-72 items-center gap-2 rounded-full border border-border/70 bg-card/80 px-3 text-sm md:flex"
               title={selectedModel.id}
             >
               <span className="shrink-0 text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -91,12 +91,12 @@ export default async function ConversationPage({
               typo3BaseUrl={env.TYPO3_BASE_URL || "Not configured"}
             />
             <a href={`/api/conversations/${id}/export`}>
-              <Button variant="outline" size="sm">
+              <Button variant="outline" size="sm" className="h-9">
                 Export Markdown
               </Button>
             </a>
             <form action="/api/auth/logout">
-              <Button variant="outline" size="sm">
+              <Button variant="outline" size="sm" className="h-9">
                 Logout
               </Button>
             </form>
