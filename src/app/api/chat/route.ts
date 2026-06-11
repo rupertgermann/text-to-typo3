@@ -27,6 +27,7 @@ import {
   deserializeMessageParts,
   extractMessageText,
   hasFileParts,
+  prepareMessagesForModelInput,
   serializeMessageParts,
 } from "@/lib/chat-message-parts";
 import {
@@ -35,6 +36,7 @@ import {
 } from "@/lib/agent-loop-policy";
 import { budgetModelMessages } from "@/lib/context-budget";
 import {
+  DEFAULT_CHAT_MODEL_ID,
   getModelContextWindowHint,
   listCustomProviderModels,
   listLmStudioModels,
@@ -184,6 +186,7 @@ export async function POST(request: NextRequest) {
       : undefined;
   const trigger =
     body.trigger === "regenerate-message" ? "regenerate-message" : "submit-message";
+  let continuationAssistantMessageId: string | null = null;
 
   if (!conversationId || typeof conversationId !== "string") {
     return Response.json({ error: "conversationId is required" }, { status: 400 });
@@ -285,6 +288,7 @@ export async function POST(request: NextRequest) {
     }
 
     userText = precedingUserMessage.content;
+    continuationAssistantMessageId = targetMessageId;
 
     await db
       .update(messages)
@@ -374,8 +378,9 @@ export async function POST(request: NextRequest) {
       deserializeMessageParts(msg.tool_calls) ?? [{ type: "text", text: msg.content }],
   }));
 
+  const modelInputMessages = prepareMessagesForModelInput(originalMessages);
   const modelMessages = await convertToModelMessages(
-    originalMessages.map((message) => ({
+    modelInputMessages.map((message) => ({
       role: message.role,
       parts: message.parts,
     })),
@@ -383,7 +388,7 @@ export async function POST(request: NextRequest) {
 
   const env = getEnv();
   const userSettings = await getResolvedUserSettings(userId);
-  const configuredModelId = userSettings.modelId || "gpt-5.4-mini";
+  const configuredModelId = userSettings.modelId || DEFAULT_CHAT_MODEL_ID;
   const parsedCustomModel = parseCustomModelId(configuredModelId);
   const selectedCustomProvider = resolveCustomProviderSelection(
     configuredModelId,
@@ -511,14 +516,25 @@ export async function POST(request: NextRequest) {
       const tokenUsage = normalizeLanguageModelUsage(await result.totalUsage);
 
       if (assistantText.trim() || responseMessage.parts.some((part) => part.type.startsWith("tool-"))) {
-        await db.insert(messages).values({
-          conversation_id: conversationId,
-          role: "assistant",
+        const assistantMessageValues = {
           content: assistantText,
           tool_calls: serializeMessageParts(responseMessage.parts),
           input_tokens: tokenUsage.inputTokens,
           output_tokens: tokenUsage.outputTokens,
-        });
+        };
+
+        if (continuationAssistantMessageId) {
+          await db
+            .update(messages)
+            .set(assistantMessageValues)
+            .where(eq(messages.id, continuationAssistantMessageId));
+        } else {
+          await db.insert(messages).values({
+            conversation_id: conversationId,
+            role: "assistant",
+            ...assistantMessageValues,
+          });
+        }
       }
 
       if (/^new conversation$/i.test(conversation.title) && userText.trim()) {

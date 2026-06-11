@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import {
   DefaultChatTransport,
@@ -39,6 +39,10 @@ import {
   starterPrompts,
   type StarterPromptCategory,
 } from "@/lib/starter-prompts";
+import {
+  getChatAutoScrollBehavior,
+  isNearChatBottom,
+} from "./chat-scroll";
 
 interface ChatInterfaceProps {
   initialAutoApproveWrites: boolean;
@@ -115,7 +119,12 @@ export function ChatInterface({
   const [composerError, setComposerError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const transcriptViewportRef = useRef<HTMLDivElement>(null);
+  const shouldStickToBottomRef = useRef(true);
+  const initialUiMessages = useMemo(
+    () => toUIMessages(initialMessages),
+    [initialMessages],
+  );
   const {
     messages,
     status,
@@ -126,7 +135,7 @@ export function ChatInterface({
     regenerate,
     stop,
   } = useChat({
-    messages: toUIMessages(initialMessages),
+    messages: initialUiMessages,
     transport: new DefaultChatTransport({
       body: { conversationId },
     }),
@@ -136,10 +145,30 @@ export function ChatInterface({
   const isLoading = status === "submitted" || status === "streaming";
   const lastTranscriptMessage = messages[messages.length - 1];
 
-  // Auto-scroll to bottom when messages change
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  const handleTranscriptScroll = useCallback(() => {
+    const viewport = transcriptViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    shouldStickToBottomRef.current = isNearChatBottom(viewport);
+  }, []);
+
+  useLayoutEffect(() => {
+    const viewport = transcriptViewportRef.current;
+    if (!viewport || !shouldStickToBottomRef.current) {
+      return;
+    }
+
+    const top = viewport.scrollHeight;
+    const behavior = getChatAutoScrollBehavior(status);
+    if (behavior === "auto") {
+      viewport.scrollTop = top;
+      return;
+    }
+
+    viewport.scrollTo({ top, behavior });
+  }, [messages, status]);
 
   const addFiles = (files: File[]) => {
     const imageFiles = files.filter(isImageFile);
@@ -270,6 +299,13 @@ export function ChatInterface({
     queueMicrotask(() => textareaRef.current?.focus());
   };
 
+  const handleToolApprovalResponse = useCallback(
+    (approval: { approved: boolean; id: string; reason?: string }) => {
+      void addToolApprovalResponse(approval);
+    },
+    [addToolApprovalResponse],
+  );
+
   const removeAttachment = (index: number) => {
     setAttachments((current) => {
       const next = current.filter((_, currentIndex) => currentIndex !== index);
@@ -330,7 +366,11 @@ export function ChatInterface({
           </Button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8">
+        <div
+          ref={transcriptViewportRef}
+          className="flex-1 overflow-y-auto px-4 py-6 md:px-8"
+          onScroll={handleTranscriptScroll}
+        >
           <div className="mx-auto max-w-4xl space-y-5">
             {messages.length === 0 ? (
               <div className="mx-auto flex min-h-[420px] w-full max-w-3xl flex-col justify-center py-6">
@@ -389,9 +429,7 @@ export function ChatInterface({
                       ? () => regenerate({ messageId: message.id })
                       : undefined
                   }
-                  onToolApprovalResponse={(approval) => {
-                    void addToolApprovalResponse(approval);
-                  }}
+                  onToolApprovalResponse={handleToolApprovalResponse}
                 />
               ))
             )}
@@ -427,8 +465,6 @@ export function ChatInterface({
                 </div>
               </div>
             )}
-
-            <div ref={messagesEndRef} />
           </div>
         </div>
 

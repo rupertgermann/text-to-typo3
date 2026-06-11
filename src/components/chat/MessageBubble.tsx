@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import ReactMarkdown from "react-markdown";
+import { memo, useState } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import { isFileUIPart, isToolUIPart, type UIMessage } from "ai";
 import { Check, Copy, Pencil, RotateCcw } from "lucide-react";
 import remarkGfm from "remark-gfm";
@@ -24,7 +24,40 @@ interface MessageBubbleProps {
   }) => void;
 }
 
-export function MessageBubble({
+const markdownRemarkPlugins = [remarkGfm];
+
+const markdownComponents: Components = {
+  code(props) {
+    const { className, children, ...rest } = props;
+    const isInline = !className;
+
+    if (isInline) {
+      return (
+        <code
+          {...rest}
+          className="rounded bg-background/70 px-1 py-0.5 font-mono text-sm"
+        >
+          {children}
+        </code>
+      );
+    }
+
+    return (
+      <code {...rest} className={className}>
+        {children}
+      </code>
+    );
+  },
+  table(props) {
+    return (
+      <div className="my-4 overflow-x-auto">
+        <table {...props} />
+      </div>
+    );
+  },
+};
+
+function MessageBubbleComponent({
   message,
   allowEdit = true,
   allowRegenerate = false,
@@ -145,37 +178,8 @@ export function MessageBubble({
                 className="prose prose-sm max-w-none dark:prose-invert prose-pre:overflow-x-auto prose-pre:rounded-md prose-pre:bg-muted prose-pre:p-3"
               >
                 <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={{
-                    code(props) {
-                      const { className, children, ...rest } = props;
-                      const isInline = !className;
-
-                      if (isInline) {
-                        return (
-                          <code
-                            {...rest}
-                            className="rounded bg-background/70 px-1 py-0.5 font-mono text-sm"
-                          >
-                            {children}
-                          </code>
-                        );
-                      }
-
-                      return (
-                        <code {...rest} className={className}>
-                          {children}
-                        </code>
-                      );
-                    },
-                    table(props) {
-                      return (
-                        <div className="my-4 overflow-x-auto">
-                          <table {...props} />
-                        </div>
-                      );
-                    },
-                  }}
+                  remarkPlugins={markdownRemarkPlugins}
+                  components={markdownComponents}
                 >
                   {part.text}
                 </ReactMarkdown>
@@ -230,4 +234,104 @@ export function MessageBubble({
       </div>
     </div>
   );
+}
+
+export const MessageBubble = memo(
+  MessageBubbleComponent,
+  areMessageBubblePropsEqual,
+);
+
+function areMessageBubblePropsEqual(
+  previous: MessageBubbleProps,
+  next: MessageBubbleProps,
+): boolean {
+  return (
+    previous.allowEdit === next.allowEdit &&
+    previous.allowRegenerate === next.allowRegenerate &&
+    areMessagesEqual(previous.message, next.message)
+  );
+}
+
+function areMessagesEqual(previous: UIMessage, next: UIMessage): boolean {
+  return (
+    previous === next ||
+    (previous.id === next.id &&
+      previous.role === next.role &&
+      areMessageMetadataEqual(previous.metadata, next.metadata) &&
+      areMessagePartsEqual(previous.parts, next.parts))
+  );
+}
+
+function areMessageMetadataEqual(
+  previous: UIMessage["metadata"],
+  next: UIMessage["metadata"],
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+
+  return (
+    getNumericMetadataValue(previous, "createdAt") ===
+      getNumericMetadataValue(next, "createdAt") &&
+    getNumericMetadataValue(previous, "inputTokens") ===
+      getNumericMetadataValue(next, "inputTokens") &&
+    getNumericMetadataValue(previous, "outputTokens") ===
+      getNumericMetadataValue(next, "outputTokens")
+  );
+}
+
+function getNumericMetadataValue(
+  metadata: UIMessage["metadata"],
+  key: string,
+): number | null {
+  if (!metadata || typeof metadata !== "object" || !(key in metadata)) {
+    return null;
+  }
+
+  const value = metadata[key as keyof typeof metadata];
+  return typeof value === "number" ? value : null;
+}
+
+function areMessagePartsEqual(
+  previousParts: UIMessage["parts"],
+  nextParts: UIMessage["parts"],
+): boolean {
+  if (previousParts === nextParts) {
+    return true;
+  }
+
+  if (previousParts.length !== nextParts.length) {
+    return false;
+  }
+
+  return previousParts.every((previousPart, index) =>
+    areMessagePartEqual(previousPart, nextParts[index]),
+  );
+}
+
+function areMessagePartEqual(
+  previousPart: UIMessage["parts"][number],
+  nextPart: UIMessage["parts"][number],
+): boolean {
+  if (previousPart === nextPart) {
+    return true;
+  }
+
+  if (previousPart.type !== nextPart.type) {
+    return false;
+  }
+
+  if (previousPart.type === "text" && nextPart.type === "text") {
+    return previousPart.text === nextPart.text;
+  }
+
+  if (isFileUIPart(previousPart) && isFileUIPart(nextPart)) {
+    return (
+      previousPart.url === nextPart.url &&
+      previousPart.mediaType === nextPart.mediaType &&
+      previousPart.filename === nextPart.filename
+    );
+  }
+
+  return false;
 }

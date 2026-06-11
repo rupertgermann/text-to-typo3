@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   getModelContextWindowLabel,
   getModelContextWindowShortLabel,
+  getSelectedModelSummary,
   listOpenAIModels,
 } from "./models";
 
@@ -22,6 +23,47 @@ describe("model context window labels", () => {
     expect(getModelContextWindowShortLabel(32000)).toBe("32k ctx");
     expect(getModelContextWindowShortLabel(1000000)).toBe("1M ctx");
     expect(getModelContextWindowShortLabel(512)).toBe("512 ctx");
+  });
+});
+
+describe("selected model summary", () => {
+  it("uses the effective default chat model without fetching catalogs", () => {
+    expect(getSelectedModelSummary({ modelId: null })).toEqual({
+      id: "gpt-5.4-mini",
+      name: "GPT-5.4 mini",
+      providerName: "OpenAI",
+    });
+  });
+
+  it("labels selected LM Studio models from persisted settings", () => {
+    expect(
+      getSelectedModelSummary({
+        modelId: "local-content-model",
+        lmstudioModelId: "local-content-model",
+      }),
+    ).toEqual({
+      id: "local-content-model",
+      name: "local content model",
+      providerName: "LM Studio",
+    });
+  });
+
+  it("labels selected custom provider models without loading provider catalogs", () => {
+    expect(
+      getSelectedModelSummary({
+        modelId: "custom:staging:typo3-editor-32k",
+        customProviders: [
+          {
+            id: "staging",
+            displayName: "Staging endpoint",
+          },
+        ],
+      }),
+    ).toEqual({
+      id: "custom:staging:typo3-editor-32k",
+      name: "typo3 editor 32k",
+      providerName: "Staging endpoint",
+    });
   });
 });
 

@@ -36,6 +36,14 @@ export interface UserModelCatalog {
   customProviders: PublicCustomProvider[];
 }
 
+export const DEFAULT_CHAT_MODEL_ID = "gpt-5.4-mini";
+
+export interface SelectedModelSummary {
+  id: string;
+  name: string;
+  providerName: string | null;
+}
+
 const LATEST_OPENAI_MODELS: Array<{
   id: string;
   name: string;
@@ -86,6 +94,45 @@ export function getModelContextWindowHint(id: string): number | null {
 
 function buildDisplayName(id: string): string {
   return id.replaceAll("-", " ");
+}
+
+export function getSelectedModelSummary({
+  customProviders = [],
+  lmstudioModelId,
+  modelId,
+}: {
+  customProviders?: Pick<PublicCustomProvider, "displayName" | "id">[];
+  lmstudioModelId?: string | null;
+  modelId?: string | null;
+}): SelectedModelSummary {
+  const id = normalizeModelId(modelId || DEFAULT_CHAT_MODEL_ID);
+  const openAIModel = LATEST_OPENAI_MODELS.find((model) => model.id === id);
+
+  if (openAIModel) {
+    return {
+      id,
+      name: openAIModel.name,
+      providerName: "OpenAI",
+    };
+  }
+
+  const customModelMatch = /^custom:([^:]+):(.+)$/.exec(id);
+  if (customModelMatch) {
+    const [, providerId, remoteModelId] = customModelMatch;
+    const provider = customProviders.find((entry) => entry.id === providerId);
+
+    return {
+      id,
+      name: buildDisplayName(remoteModelId),
+      providerName: provider?.displayName ?? "Custom",
+    };
+  }
+
+  return {
+    id,
+    name: buildDisplayName(id),
+    providerName: lmstudioModelId === id ? "LM Studio" : null,
+  };
 }
 
 type LmStudioModelCandidate = {

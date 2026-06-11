@@ -8,10 +8,11 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ChatInterface } from "@/components/chat/ChatInterface";
 import { ConversationSidebar } from "@/components/conversations/conversation-sidebar";
 import { SettingsModal } from "@/components/settings/settings-modal";
-import { ModelPickerDropdown } from "@/components/settings/model-picker-dropdown";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { getEnv } from "@/lib/env";
+import { getSelectedModelSummary } from "@/lib/models";
 import { formatTokenUsage, sumTokenUsage } from "@/lib/token-usage";
+import { getPublicUserSettings } from "@/lib/user-settings";
 
 interface ConversationPageProps {
   params: Promise<{ id: string }>;
@@ -59,6 +60,8 @@ export default async function ConversationPage({
     .toUpperCase()
     .slice(0, 2);
   const env = getEnv();
+  const userSettings = await getPublicUserSettings(user.id);
+  const selectedModel = getSelectedModelSummary(userSettings);
 
   return (
     <div className="flex h-full min-h-0 bg-transparent">
@@ -84,7 +87,20 @@ export default async function ConversationPage({
               </span>
             </div>
             <ThemeToggle />
-            <ModelPickerDropdown className="hidden md:inline-flex" />
+            <div
+              className="hidden max-w-72 items-center gap-2 rounded-full border border-border/70 bg-card/80 px-3 py-1.5 text-sm md:flex"
+              title={selectedModel.id}
+            >
+              <span className="shrink-0 text-[11px] uppercase tracking-wide text-muted-foreground">
+                Model
+              </span>
+              <span className="truncate font-semibold">{selectedModel.name}</span>
+              {selectedModel.providerName ? (
+                <span className="shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[11px] font-medium text-secondary-foreground">
+                  {selectedModel.providerName}
+                </span>
+              ) : null}
+            </div>
             <SettingsModal
               displayName={user.display_name}
               typo3BaseUrl={env.TYPO3_BASE_URL || "Not configured"}

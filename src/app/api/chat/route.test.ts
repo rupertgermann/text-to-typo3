@@ -522,6 +522,19 @@ describe("chat route integration", () => {
     expect(
       (await latestAssistantMessage("conversation-write-approval"))?.content,
     ).toBe("Approved write completed.");
+
+    const approvalRows = await db.query.messages.findMany({
+      where: eq(messages.conversation_id, "conversation-write-approval"),
+      orderBy: [asc(messages.created_at)],
+    });
+    const assistantRows = approvalRows.filter(
+      (message) => message.role === "assistant",
+    );
+
+    expect(assistantRows).toHaveLength(1);
+    expect(assistantRows[0]?.id).toBe(pendingAssistant?.id);
+    expect(assistantRows[0]?.tool_calls).toContain("output-available");
+    expect(assistantRows[0]?.tool_calls).not.toContain("approval-responded");
   });
 
   it("rejects write tools without calling MCP and forwards the rejection reason", async () => {
