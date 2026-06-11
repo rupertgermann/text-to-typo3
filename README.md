@@ -2,7 +2,7 @@
 
 ### Prompt your TYPO3 Website's content into existence with AI
 
-`text-to-typo3` is a Next.js App Router application for chatting with a TYPO3 instance through its MCP server (https://github.com/hauptsacheNet/typo3-mcp-server). Editors authenticate with TYPO3 OAuth or local MCP token mode, work inside conversation threads, inspect tool calls inline, and use either OpenAI or LM Studio-backed models from the same interface.
+`text-to-typo3` is a Next.js App Router application for chatting with a TYPO3 instance through its MCP server (https://github.com/hauptsacheNet/typo3-mcp-server). Editors authenticate with TYPO3 OAuth or local MCP token mode, work inside conversation threads, inspect tool calls inline, approve TYPO3 writes when needed, and use OpenAI, LM Studio, or custom OpenAI-compatible model providers from the same interface.
 
 The project is released under the MIT license.
 
@@ -13,14 +13,18 @@ The project is released under the MIT license.
 - Streams AI responses token-by-token with the Vercel AI SDK.
 - Persists conversations, messages, tool calls, and per-user model settings in SQLite.
 - Connects server-side to the TYPO3 MCP endpoint and forwards the authenticated TYPO3 bearer token on every MCP request.
+- Applies a consistent API auth wrapper and JSON error shape across app API routes.
 - Supports multi-step MCP tool execution so the assistant can inspect TYPO3 state, fetch schema details, and continue to follow-up tool calls inside the same response.
+- Protects MCP requests with request timeouts, expiring session cache entries, and tool-cache invalidation when Write Approval mode changes.
 - Guides TYPO3 write operations toward schema-aware retries when a `WriteTable` call returns validation or missing-input feedback.
-- Supports TYPO3 tool calling for both OpenAI and LM Studio models through the same server-side MCP bridge, with provider-specific model routing where needed.
+- Supports TYPO3 tool calling for OpenAI, LM Studio, and custom OpenAI-compatible providers through the same server-side MCP bridge, with provider-specific model routing where needed.
+- Surfaces pending Write Approval through a persistent banner above the composer and a highlighted tool card in the transcript.
 - Renders MCP tool calls inline in the chat and in a filterable Activity sidebar.
 - Supports message editing and rerunning from an earlier user prompt.
 - Supports image attachments through drag-and-drop or the file picker.
-- Supports conversation search, inline rename, delete, and Markdown export.
-- Supports model selection from OpenAI and LM Studio, including context-window hints in the UI.
+- Supports cached, debounced conversation search, inline rename, delete, and Markdown export.
+- Supports provider-aware model selection from OpenAI, LM Studio, and custom endpoints, including context-window hints in the UI.
+- Queries model providers in parallel with per-provider timeouts, provider status, and persisted context-window hints for chat budgeting.
 - Includes a scaffold CLI for provisioning a local TYPO3 + DDEV environment and writing matching app configuration.
 
 ## Screenshots
@@ -70,6 +74,9 @@ ENCRYPTION_KEY=generate-a-64-char-hex-key
 SESSION_SECRET=generate-a-long-random-secret
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 TYPO3_MCP_SYSTEM_PROMPT=Optional TYPO3-specific system prompt text
+TYPO3_AGENT_MAX_STEPS=12
+MODEL_CATALOG_TIMEOUT_MS=4000
+DATABASE_PATH=data/app.db
 ```
 
 ### Notes
@@ -84,6 +91,9 @@ TYPO3_MCP_SYSTEM_PROMPT=Optional TYPO3-specific system prompt text
 - `SESSION_SECRET` secures the Iron Session cookie.
 - `NEXT_PUBLIC_APP_URL` should match the externally reachable app URL used in the TYPO3 OAuth callback.
 - `TYPO3_MCP_SYSTEM_PROMPT` is appended to the chat system prompt for instance-specific guidance.
+- `TYPO3_AGENT_MAX_STEPS` controls the maximum model/tool round-trips in one chat request. The default is `12`.
+- `MODEL_CATALOG_TIMEOUT_MS` controls the per-provider model catalog timeout. The default is `4000`.
+- `DATABASE_PATH` points at the SQLite database file. The default is `data/app.db`.
 - Never commit `.env.local`, scaffold output, or generated TYPO3 credentials.
 
 Detailed TYPO3 setup, Composer packages, and OAuth value mapping are documented in [docs/typo3-setup.md](./docs/typo3-setup.md).
@@ -169,8 +179,11 @@ pnpm start
 
 ```bash
 pnpm dev
+pnpm dev:turbopack
 pnpm build
 pnpm start
+pnpm typecheck
+pnpm test
 pnpm lint
 pnpm scaffold
 pnpm db:generate
@@ -181,8 +194,11 @@ pnpm db:studio
 ### Script reference
 
 - `pnpm dev`: starts the Next.js development server.
+- `pnpm dev:turbopack`: starts the Next.js development server with Turbopack.
 - `pnpm build`: creates the production build.
 - `pnpm start`: serves the production build.
+- `pnpm typecheck`: runs TypeScript without emitting build artifacts.
+- `pnpm test`: runs the Vitest suite.
 - `pnpm lint`: runs ESLint.
 - `pnpm scaffold`: provisions or refreshes a local TYPO3 scaffold plan.
 - `pnpm db:generate`: generates Drizzle SQL from schema changes.
@@ -202,7 +218,8 @@ pnpm db:studio
 
 - The home route redirects to the latest conversation or creates a default one for first-time users.
 - Conversations are listed in a left sidebar, ordered by last activity.
-- Conversations can be created, renamed inline, deleted, searched, and exported as Markdown.
+- Conversations can be created, renamed inline, deleted, searched with a debounced cached query, and exported as Markdown.
+- Sidebar results stay visible while background refreshes run, and same-key requests share in-flight fetches.
 - The first user prompt in a new conversation becomes the basis of the auto-generated title.
 
 ### Chat
@@ -212,28 +229,35 @@ pnpm db:studio
 - User messages support copy, timestamp hover state, edit-and-rerun, and image attachments.
 - Stopping generation preserves the partial response.
 - Conversation history restores after reload.
-- TYPO3 MCP sessions can span several tool steps inside one response, up to five model/tool round-trips per request.
+- TYPO3 MCP sessions can span several tool steps inside one response, up to `TYPO3_AGENT_MAX_STEPS` model/tool round-trips per request.
+- Chat requests resolve the turn, provider, and persistence plan through dedicated modules before streaming.
+- Long tool outputs are condensed or older turns are dropped for model input when the active context window requires budgeting; persisted messages stay unchanged.
 - When TYPO3 write validation fails, the assistant is instructed to inspect schema details and retry with corrected `WriteTable` input before treating the task as blocked.
 
 ### Tool calls
 
 - MCP tools are fetched server-side and cached per session.
-- The app initializes and reuses TYPO3 MCP session IDs when the TYPO3 server supports MCP session headers.
+- MCP calls use request-level timeouts and categorized errors for hung or unreachable TYPO3 MCP servers.
+- The app initializes and reuses TYPO3 MCP session IDs when the TYPO3 server supports MCP session headers, and session cache entries expire automatically.
+- Tool caches are keyed by Conversation Write Approval mode so auto-approve toggles use the correct tool definitions.
 - Read and write tool calls are rendered as collapsible cards in the chat thread.
 - The Activity sidebar shows the same tool traffic in chronological order with read/write filters.
 - Write results can expose a direct TYPO3 backend record link when the MCP response includes record metadata.
+- Write operations pause for approval unless the Conversation has auto-approve writes enabled. Pending approvals show Approve/Deny controls in the banner and in the relevant tool card.
 - The upstream TYPO3 MCP server toolset used by the app includes `GetPageTree`, `GetPage`, `ListTables`, `ReadTable`, `Search`, `GetTableSchema`, `GetFlexFormSchema`, and `WriteTable`.
 
 ### Model selection
 
-- The header contains a model picker for the active conversation.
-- The settings modal includes OpenAI and LM Studio configuration.
-- Per-user settings are persisted in SQLite.
-- Context-window information is shown in the header picker and in settings tooltips.
+- The header shows the selected model for the active conversation.
+- The settings modal includes OpenAI, LM Studio, and custom OpenAI-compatible provider configuration.
+- Per-user settings, configured providers, selected model IDs, and context-window hints are persisted in SQLite.
+- Model providers are queried in parallel with per-provider status. Slow or unreachable providers appear as unavailable while other provider results stay usable.
+- Settings render saved values immediately while provider catalogs load in the background.
+- Context-window information is shown in model cards and persisted for chat budgeting.
 - The default selected model falls back to `gpt-5.4-mini` when no user preference is stored.
 - `gpt-5.4-nano` uses the provider's built-in MCP server tool integration; other OpenAI-compatible models use the app's TYPO3 MCP bridge.
-- LM Studio models use the chat-completions path and the same server-side TYPO3 MCP bridge as the app-managed OpenAI path.
-- For TYPO3 mutation requests on LM Studio models, the chat loop keeps tool calling active until a write succeeds or the configured step cap is reached.
+- LM Studio and custom OpenAI-compatible models use the chat-completions path and the same server-side TYPO3 MCP bridge as the app-managed OpenAI path.
+- For TYPO3 mutation requests on OpenAI-compatible chat-completions models, the chat loop keeps tool calling active until a write succeeds or the configured step cap is reached.
 
 ## UI Overview
 
@@ -241,7 +265,8 @@ pnpm db:studio
 
 - Active conversation title
 - Current TYPO3 user identity
-- Model picker
+- Selected model indicator
+- Theme toggle
 - Settings modal
 - Markdown export action
 - Logout action
@@ -258,6 +283,7 @@ pnpm db:studio
 
 - Streaming message list
 - Inline MCP tool cards
+- Pending Write Approval banner
 - Composer with message editing state
 - Drag-and-drop image attachments
 - Stop button during generation
@@ -278,6 +304,8 @@ The current schema includes:
 - `conversations`
 - `messages`
 - `user_settings`
+
+The schema includes indexes for conversation/message/session lookup paths and SQL aggregates for assistant token totals. Existing development databases are repaired on app startup when an expected non-production column is missing.
 
 ## TYPO3 Scaffold CLI
 
@@ -346,7 +374,7 @@ Typical setup:
 3. Open Settings in the app.
 4. Paste the base URL into the LM Studio section.
 5. Click `Fetch models`.
-6. Select a model in Settings or in the header picker.
+6. Select a model in Settings.
 
 The model catalog endpoint accepts an LM Studio base URL override, which is how the Settings UI fetches available local models before saving a selection.
 
@@ -358,6 +386,16 @@ OpenAI models are available when either:
 - a user stores a personal OpenAI API key in Settings.
 
 The user-specific key takes precedence for that user.
+
+## Custom OpenAI-Compatible Providers
+
+Settings can store additional OpenAI-compatible providers. Each custom provider has:
+
+- display name
+- base URL
+- optional API key
+
+Custom provider API keys are encrypted in SQLite. Custom provider model IDs use the `custom:<provider-id>:<remote-model-id>` format internally, while Settings shows the provider display name and remote model name.
 
 ## File Attachments
 
@@ -404,9 +442,7 @@ src/
     settings/
     ui/
   lib/
-  hooks/
 scripts/
-plans/
 docs/
 drizzle/
 ```
@@ -414,5 +450,5 @@ drizzle/
 ## Current Development Notes
 
 - The app assumes one TYPO3 instance per deployment, configured by environment variables.
-- LM Studio support is wired through the same settings and chat flow as OpenAI-compatible providers.
+- LM Studio and custom provider support are wired through the same settings and chat flow as OpenAI-compatible providers.
 - The scaffold command supports hook-based TYPO3 automation for workspace, demo content, news, and OAuth registration tasks.
