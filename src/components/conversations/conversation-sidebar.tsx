@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { MessageSquare, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,14 @@ import {
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import type { Conversation } from "@/lib/db/schema";
+import {
+  mutateClientQueries,
+  revalidateClientQueries,
+  SETTINGS_UPDATED_EVENT,
+  serializeClientQueryKey,
+  useClientQuery,
+  useDebouncedValue,
+} from "@/lib/client-query";
 
 interface ConversationSidebarProps {
   activeConversationId?: string;
@@ -49,6 +57,7 @@ function ConversationPanel({
   onRenameConversation,
   onDeleteConversation,
   isLoading,
+  isRefreshing,
   editingConversationId,
   setEditingConversationId,
   editingTitle,
@@ -63,6 +72,7 @@ function ConversationPanel({
   onRenameConversation: (conversation: Conversation) => Promise<void>;
   onDeleteConversation: (conversation: Conversation) => Promise<void>;
   isLoading: boolean;
+  isRefreshing: boolean;
   editingConversationId: string | null;
   setEditingConversationId: (id: string | null) => void;
   editingTitle: string;
@@ -98,6 +108,9 @@ function ConversationPanel({
             className="border-0 px-0 shadow-none focus-visible:ring-0"
           />
         </div>
+        {isRefreshing ? (
+          <p className="mt-2 text-xs text-muted-foreground">Refreshing...</p>
+        ) : null}
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
@@ -202,46 +215,38 @@ export function ConversationSidebar({
   className,
 }: ConversationSidebarProps) {
   const router = useRouter();
-  const [conversations, setConversations] = useState<Conversation[]>([]);
   const [query, setQuery] = useState("");
-  const [isLoading, setIsLoading] = useState(true);
+  const debouncedQuery = useDebouncedValue(query.trim(), 250);
   const [editingConversationId, setEditingConversationId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const [mobileOpen, setMobileOpen] = useState(false);
+  const conversationsKey = useMemo(
+    () => ["conversations", debouncedQuery] as const,
+    [debouncedQuery],
+  );
+  const serializedConversationsPrefix = serializeClientQueryKey(["conversations"]).slice(0, -1);
+  const fetchConversations = useCallback(async () => {
+    const url = debouncedQuery
+      ? `/api/conversations?q=${encodeURIComponent(debouncedQuery)}`
+      : "/api/conversations";
+    const response = await fetch(url);
 
-  useEffect(() => {
-    const controller = new AbortController();
-
-    async function loadConversations() {
-      setIsLoading(true);
-
-      try {
-        const search = query.trim();
-        const url = search
-          ? `/api/conversations?q=${encodeURIComponent(search)}`
-          : "/api/conversations";
-        const response = await fetch(url, { signal: controller.signal });
-
-        if (!response.ok) {
-          throw new Error("Failed to load conversations");
-        }
-
-        const data: Conversation[] = await response.json();
-        setConversations(data);
-      } catch (error) {
-        if (error instanceof Error && error.name === "AbortError") {
-          return;
-        }
-        setConversations([]);
-      } finally {
-        setIsLoading(false);
-      }
+    if (!response.ok) {
+      throw new Error("Failed to load conversations");
     }
 
-    void loadConversations();
-
-    return () => controller.abort();
-  }, [query]);
+    return response.json() as Promise<Conversation[]>;
+  }, [debouncedQuery]);
+  const {
+    data: conversations = [],
+    isLoading,
+    isRefreshing,
+  } = useClientQuery<Conversation[]>({
+    key: conversationsKey,
+    fetcher: fetchConversations,
+    keepPreviousData: true,
+    revalidateOn: [SETTINGS_UPDATED_EVENT],
+  });
 
   const panelHandlers = useMemo(
     () => ({
@@ -257,6 +262,9 @@ export function ConversationSidebar({
         }
 
         const conversation: Conversation = await response.json();
+        void revalidateClientQueries((key) =>
+          key.startsWith(serializedConversationsPrefix),
+        );
         router.push(`/conversations/${conversation.id}`);
         setMobileOpen(false);
       },
@@ -285,10 +293,12 @@ export function ConversationSidebar({
         }
 
         const updated: Conversation = await response.json();
-        setConversations((current) =>
-          current.map((entry) =>
-            entry.id === updated.id ? updated : entry,
-          ),
+        mutateClientQueries<Conversation[]>(
+          (key) => key.startsWith(serializedConversationsPrefix),
+          (current) =>
+            current?.map((entry) =>
+              entry.id === updated.id ? updated : entry,
+            ),
         );
         setEditingTitle(updated.title);
       },
@@ -305,8 +315,10 @@ export function ConversationSidebar({
           return;
         }
 
-        setConversations((current) =>
-          current.filter((entry) => entry.id !== conversation.id),
+        mutateClientQueries<Conversation[]>(
+          (key) => key.startsWith(serializedConversationsPrefix),
+          (current) =>
+            current?.filter((entry) => entry.id !== conversation.id),
         );
 
         if (activeConversationId === conversation.id) {
@@ -314,7 +326,7 @@ export function ConversationSidebar({
         }
       },
     }),
-    [activeConversationId, editingTitle, router],
+    [activeConversationId, editingTitle, router, serializedConversationsPrefix],
   );
 
   const panel = (
@@ -328,6 +340,7 @@ export function ConversationSidebar({
       onRenameConversation={panelHandlers.renameConversation}
       onDeleteConversation={panelHandlers.deleteConversation}
       isLoading={isLoading}
+      isRefreshing={isRefreshing}
       editingConversationId={editingConversationId}
       setEditingConversationId={setEditingConversationId}
       editingTitle={editingTitle}
