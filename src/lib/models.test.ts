@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  fetchOpenAICompatibleModels,
   getModelContextWindowLabel,
   getModelContextWindowShortLabel,
   getSelectedModelSummary,
@@ -69,10 +70,12 @@ describe("selected model summary", () => {
 
 describe("OpenAI model catalog filtering", () => {
   it("keeps only the curated latest OpenAI models from the API catalog", async () => {
+    const seenSignals: Array<AbortSignal | null | undefined> = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        Response.json({
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        seenSignals.push(init?.signal);
+        return Response.json({
           data: [
             { id: "gpt-5.5" },
             { id: "gpt-5.4" },
@@ -87,12 +90,13 @@ describe("OpenAI model catalog filtering", () => {
             { id: "whisper-1" },
             { id: "o4-mini" },
           ],
-        }),
-      ),
+        });
+      }),
     );
 
     const models = await listOpenAIModels("test-key");
 
+    expect(seenSignals).toEqual([expect.any(AbortSignal)]);
     expect(models.map((model) => model.id)).toEqual([
       "gpt-5.5",
       "gpt-5.4",
@@ -104,5 +108,27 @@ describe("OpenAI model catalog filtering", () => {
       contextWindow: 400000,
       description: "A new class of intelligence for coding and professional work.",
     });
+  });
+
+  it("passes an AbortSignal to OpenAI-compatible model fetches", async () => {
+    const seenSignals: Array<AbortSignal | null | undefined> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        seenSignals.push(init?.signal);
+        return Response.json({
+          data: [{ id: "local-chat" }],
+        });
+      }),
+    );
+
+    await fetchOpenAICompatibleModels({
+      baseUrl: "http://127.0.0.1:1234",
+      displayName: "Local",
+      id: "local",
+      provider: "custom",
+    });
+
+    expect(seenSignals).toEqual([expect.any(AbortSignal)]);
   });
 });

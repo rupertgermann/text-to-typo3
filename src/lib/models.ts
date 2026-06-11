@@ -28,12 +28,30 @@ export interface AvailableModel {
   description?: string | null;
 }
 
+export type ModelProviderStatus = "ok" | "unavailable";
+
+export interface ProviderCatalog {
+  providerId: string;
+  providerName: string;
+  provider: ModelProvider;
+  status: ModelProviderStatus;
+  models: AvailableModel[];
+}
+
 export interface UserModelCatalog {
   models: AvailableModel[];
+  providers: ProviderCatalog[];
   selectedModelId: string | null;
   lmstudioBaseUrl: string | null;
   hasOpenAIKey: boolean;
   customProviders: PublicCustomProvider[];
+}
+
+const DEFAULT_MODEL_CATALOG_TIMEOUT_MS = 4000;
+
+export function getModelCatalogTimeoutMs(): number {
+  const raw = Number(process.env.MODEL_CATALOG_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MODEL_CATALOG_TIMEOUT_MS;
 }
 
 export const DEFAULT_CHAT_MODEL_ID = "gpt-5.4-mini";
@@ -154,12 +172,49 @@ type OpenAICompatibleProviderConfig = {
   provider: "lmstudio" | "custom";
 };
 
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+async function fetchJson<T>(
+  url: string,
+  init: Omit<RequestInit, "signal"> & { signal: AbortSignal },
+): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) {
     throw new Error(`Failed to fetch models from ${url}`);
   }
   return response.json() as Promise<T>;
+}
+
+export async function fetchOpenAIModels(
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<AvailableModel[]> {
+  const json = await fetchJson<OpenAIModelsResponse>("https://api.openai.com/v1/models", {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: signal ?? AbortSignal.timeout(getModelCatalogTimeoutMs()),
+  });
+
+  const rawModels = Array.isArray(json?.data)
+    ? json.data
+    : [];
+
+  const availableModelIds = new Set(
+    rawModels
+      .map((entry) => entry.id?.trim())
+      .filter((id): id is string => typeof id === "string" && id.length > 0)
+      .map((id) => normalizeModelId(id).toLowerCase()),
+  );
+
+  return LATEST_OPENAI_MODELS
+    .filter((model) => availableModelIds.has(model.id))
+    .map((model) => ({
+      id: model.id,
+      name: model.name,
+      provider: "openai" as const,
+      providerId: "openai",
+      providerName: "OpenAI",
+      remoteModelId: model.id,
+      contextWindow: getModelContextWindowHint(model.id),
+      description: model.description,
+    }));
 }
 
 export async function listOpenAIModels(
@@ -170,33 +225,7 @@ export async function listOpenAIModels(
   }
 
   try {
-    const json = await fetchJson<OpenAIModelsResponse>("https://api.openai.com/v1/models", {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-
-    const rawModels = Array.isArray(json?.data)
-      ? json.data
-      : [];
-
-    const availableModelIds = new Set(
-      rawModels
-        .map((entry) => entry.id?.trim())
-        .filter((id): id is string => typeof id === "string" && id.length > 0)
-        .map((id) => normalizeModelId(id).toLowerCase()),
-    );
-
-    return LATEST_OPENAI_MODELS
-      .filter((model) => availableModelIds.has(model.id))
-      .map((model) => ({
-        id: model.id,
-        name: model.name,
-        provider: "openai" as const,
-        providerId: "openai",
-        providerName: "OpenAI",
-        remoteModelId: model.id,
-        contextWindow: getModelContextWindowHint(model.id),
-        description: model.description,
-      }));
+    return await fetchOpenAIModels(apiKey);
   } catch {
     return [];
   }
@@ -235,48 +264,56 @@ export async function listCustomProviderModels(
   return providerModels.flat().sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export async function listOpenAICompatibleModels(
+export async function fetchOpenAICompatibleModels(
   providerConfig: OpenAICompatibleProviderConfig,
+  signal?: AbortSignal,
 ): Promise<AvailableModel[]> {
   const { apiKey, baseUrl, displayName, id: providerId, provider } = providerConfig;
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
 
+  const json = await fetchJson<OpenAICompatibleModelsResponse>(
+    `${normalizedBaseUrl}/models`,
+    {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+      signal: signal ?? AbortSignal.timeout(getModelCatalogTimeoutMs()),
+    },
+  );
+  const rawModels = Array.isArray(json?.data) ? json.data : [];
+
+  return rawModels
+    .map<LmStudioModelCandidate>((entry) => {
+      const id = entry.id?.trim();
+      if (!id) {
+        return null;
+      }
+      const remoteModelId = normalizeModelId(id);
+
+      return {
+        id:
+          provider === "custom"
+            ? `custom:${providerId}:${remoteModelId}`
+            : remoteModelId,
+        name: entry.name?.trim() || buildDisplayName(id),
+        provider,
+        providerId,
+        providerName: displayName,
+        remoteModelId,
+        contextWindow:
+          entry.context_length ??
+          entry.max_context_length ??
+          getModelContextWindowHint(id),
+        baseUrl: normalizedBaseUrl,
+      };
+    })
+    .filter((model): model is Exclude<LmStudioModelCandidate, null> => model !== null)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function listOpenAICompatibleModels(
+  providerConfig: OpenAICompatibleProviderConfig,
+): Promise<AvailableModel[]> {
   try {
-    const json = await fetchJson<OpenAICompatibleModelsResponse>(
-      `${normalizedBaseUrl}/models`,
-      {
-        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
-      },
-    );
-    const rawModels = Array.isArray(json?.data) ? json.data : [];
-
-    return rawModels
-      .map<LmStudioModelCandidate>((entry) => {
-        const id = entry.id?.trim();
-        if (!id) {
-          return null;
-        }
-        const remoteModelId = normalizeModelId(id);
-
-        return {
-          id:
-            provider === "custom"
-              ? `custom:${providerId}:${remoteModelId}`
-              : remoteModelId,
-          name: entry.name?.trim() || buildDisplayName(id),
-          provider,
-          providerId,
-          providerName: displayName,
-          remoteModelId,
-          contextWindow:
-            entry.context_length ??
-            entry.max_context_length ??
-            getModelContextWindowHint(id),
-          baseUrl: normalizedBaseUrl,
-        };
-      })
-      .filter((model): model is Exclude<LmStudioModelCandidate, null> => model !== null)
-      .sort((a, b) => a.name.localeCompare(b.name));
+    return await fetchOpenAICompatibleModels(providerConfig);
   } catch {
     return [];
   }
