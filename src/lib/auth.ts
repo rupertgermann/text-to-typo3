@@ -50,6 +50,13 @@ async function ensureLocalTokenUser(): Promise<User> {
   return createdUser!;
 }
 
+function createLocalTokenSession(): IronSession<SessionData> {
+  return {
+    sessionId: `token:${LOCAL_TOKEN_USER_ID}`,
+    userId: LOCAL_TOKEN_USER_ID,
+  } as IronSession<SessionData>;
+}
+
 /**
  * Retrieves a valid access token for the given session, refreshing it
  * automatically if the current token has expired or is about to expire.
@@ -129,12 +136,18 @@ export async function getAuthenticatedUser():
 
     return {
       accessToken: env.TYPO3_MCP_ACCESS_TOKEN,
-      session: await getSession(),
+      session: createLocalTokenSession(),
       user,
     };
   }
 
-  const session = await getSession();
+  let session: IronSession<SessionData>;
+
+  try {
+    session = await getSession();
+  } catch {
+    return null;
+  }
 
   if (!session.userId || !session.sessionId) {
     return null;

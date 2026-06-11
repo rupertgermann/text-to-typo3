@@ -48,6 +48,11 @@ const TOOL_CACHE_TTL_MS = 5 * 60 * 1000;
 const toolCache = new Map<string, CachedToolSet>();
 const mcpSessionCache = new Map<string, string>();
 
+export function resetMcpCachesForTests(): void {
+  toolCache.clear();
+  mcpSessionCache.clear();
+}
+
 export function getTypo3McpUrl(): string {
   const env = getEnv();
   const baseUrl = env.TYPO3_MCP_URL || `${env.TYPO3_BASE_URL}/mcp`;

@@ -19,7 +19,7 @@ import {
   getAgentLoopStepOptions,
 } from "@/lib/agent-loop-policy";
 import { budgetModelMessages } from "@/lib/context-budget";
-import { getModelContextWindowHint } from "@/lib/models";
+import { getModelContextWindowHint, listLmStudioModels } from "@/lib/models";
 import { normalizeLanguageModelUsage } from "@/lib/token-usage";
 
 const SYSTEM_PROMPT = `You are a helpful assistant for TYPO3 CMS. You help users manage their TYPO3 website by answering questions, providing guidance, and assisting with content management tasks. Be concise, accurate, and helpful. When discussing TYPO3-specific features, refer to the correct TYPO3 version terminology and best practices. Use TYPO3 MCP tools when you need live site data or need to modify TYPO3 content. Default writes to TYPO3 workspaces, and ask for confirmation before broad changes that affect many records.
@@ -232,8 +232,13 @@ export async function POST(request: NextRequest) {
     Boolean(userSettings.modelId) &&
     userSettings.modelId === userSettings.lmstudioModelId;
   const modelId = userSettings.modelId || "gpt-5.4-mini";
+  const lmStudioModelContextWindow = useLmStudio && userSettings.lmstudioBaseUrl
+    ? (await listLmStudioModels(userSettings.lmstudioBaseUrl)).find(
+        (model) => model.id === modelId,
+      )?.contextWindow
+    : null;
   const budgetedModelMessages = budgetModelMessages(modelMessages, {
-    contextWindow: getModelContextWindowHint(modelId),
+    contextWindow: lmStudioModelContextWindow ?? getModelContextWindowHint(modelId),
     reservedOutputTokens: 4096,
   });
   const openAiApiKey =
