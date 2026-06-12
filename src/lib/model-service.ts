@@ -16,17 +16,96 @@ type ProviderSource = {
   fetchModels: (signal: AbortSignal) => Promise<AvailableModel[]>;
 };
 
+type ModelCatalogSources = Pick<
+  UserModelCatalog,
+  "customProviders" | "hasOpenAIKey" | "lmstudioBaseUrl" | "selectedModelId"
+> & {
+  sources: ProviderSource[];
+  timeoutMs: number;
+};
+
+export type UserModelCatalogStreamEvent =
+  | {
+      type: "metadata";
+      customProviders: UserModelCatalog["customProviders"];
+      hasOpenAIKey: boolean;
+      lmstudioBaseUrl: string | null;
+      selectedModelId: string | null;
+    }
+  | { type: "provider"; provider: ProviderCatalog }
+  | { type: "done"; catalog: UserModelCatalog };
+
 export async function listAvailableModelsForUser(
   userId: string,
   options?: {
     lmstudioBaseUrlOverride?: string | null;
   },
 ): Promise<UserModelCatalog> {
+  const catalogSources = await getModelCatalogSourcesForUser(userId, options);
+  const providers = await Promise.all(
+    catalogSources.sources.map((source) =>
+      fetchProviderCatalog(source, catalogSources.timeoutMs),
+    ),
+  );
+
+  return buildUserModelCatalog(catalogSources, providers);
+}
+
+export async function* streamAvailableModelsForUser(
+  userId: string,
+  options?: {
+    lmstudioBaseUrlOverride?: string | null;
+  },
+): AsyncGenerator<UserModelCatalogStreamEvent> {
+  const catalogSources = await getModelCatalogSourcesForUser(userId, options);
+
+  yield {
+    type: "metadata",
+    customProviders: catalogSources.customProviders,
+    hasOpenAIKey: catalogSources.hasOpenAIKey,
+    lmstudioBaseUrl: catalogSources.lmstudioBaseUrl,
+    selectedModelId: catalogSources.selectedModelId,
+  };
+
+  const providers: Array<ProviderCatalog | undefined> = new Array(
+    catalogSources.sources.length,
+  );
+  const pending = new Map(
+    catalogSources.sources.map((source, index) => [
+      index,
+      fetchProviderCatalog(source, catalogSources.timeoutMs).then((provider) => ({
+        index,
+        provider,
+      })),
+    ]),
+  );
+
+  while (pending.size > 0) {
+    const { index, provider } = await Promise.race(pending.values());
+    pending.delete(index);
+    providers[index] = provider;
+    yield { type: "provider", provider };
+  }
+
+  yield {
+    type: "done",
+    catalog: buildUserModelCatalog(
+      catalogSources,
+      providers.filter((provider): provider is ProviderCatalog => Boolean(provider)),
+    ),
+  };
+}
+
+async function getModelCatalogSourcesForUser(
+  userId: string,
+  options?: {
+    lmstudioBaseUrlOverride?: string | null;
+  },
+): Promise<ModelCatalogSources> {
   const settings = await getResolvedUserSettings(userId);
   const lmstudioBaseUrl =
     options?.lmstudioBaseUrlOverride ?? settings.lmstudioBaseUrl;
   const timeoutMs = getModelCatalogTimeoutMs();
-
   const sources: ProviderSource[] = [];
 
   if (settings.openAiApiKey) {
@@ -76,20 +155,43 @@ export async function listAvailableModelsForUser(
     });
   }
 
-  const providers: ProviderCatalog[] = await Promise.all(
-    sources.map(async ({ fetchModels, ...descriptor }) => {
-      try {
-        return {
-          ...descriptor,
-          status: "ok" as const,
-          models: await fetchModels(AbortSignal.timeout(timeoutMs)),
-        };
-      } catch {
-        return { ...descriptor, status: "unavailable" as const, models: [] };
-      }
-    }),
-  );
+  return {
+    sources,
+    timeoutMs,
+    selectedModelId: settings.modelId,
+    lmstudioBaseUrl,
+    hasOpenAIKey: Boolean(settings.openAiApiKey),
+    customProviders: settings.customProviders.map((provider) => ({
+      id: provider.id,
+      displayName: provider.displayName,
+      baseUrl: provider.baseUrl,
+      hasApiKey: Boolean(provider.apiKey),
+    })),
+  };
+}
 
+async function fetchProviderCatalog(
+  { fetchModels, ...descriptor }: ProviderSource,
+  timeoutMs: number,
+): Promise<ProviderCatalog> {
+  try {
+    return {
+      ...descriptor,
+      status: "ok" as const,
+      models: await fetchModels(AbortSignal.timeout(timeoutMs)),
+    };
+  } catch {
+    return { ...descriptor, status: "unavailable" as const, models: [] };
+  }
+}
+
+function buildUserModelCatalog(
+  catalogSources: Pick<
+    UserModelCatalog,
+    "customProviders" | "hasOpenAIKey" | "lmstudioBaseUrl" | "selectedModelId"
+  >,
+  providers: ProviderCatalog[],
+): UserModelCatalog {
   const modelsOfKind = (kind: ModelProvider) =>
     providers
       .filter((provider) => provider.provider === kind)
@@ -102,14 +204,9 @@ export async function listAvailableModelsForUser(
       ...modelsOfKind("custom").sort((a, b) => a.name.localeCompare(b.name)),
     ],
     providers,
-    selectedModelId: settings.modelId,
-    lmstudioBaseUrl,
-    hasOpenAIKey: Boolean(settings.openAiApiKey),
-    customProviders: settings.customProviders.map((provider) => ({
-      id: provider.id,
-      displayName: provider.displayName,
-      baseUrl: provider.baseUrl,
-      hasApiKey: Boolean(provider.apiKey),
-    })),
+    selectedModelId: catalogSources.selectedModelId,
+    lmstudioBaseUrl: catalogSources.lmstudioBaseUrl,
+    hasOpenAIKey: catalogSources.hasOpenAIKey,
+    customProviders: catalogSources.customProviders,
   };
 }
