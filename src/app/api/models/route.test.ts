@@ -169,4 +169,65 @@ describe("models route", () => {
       expect.objectContaining({ id: "custom:healthy:healthy-chat" }),
     );
   });
+
+  it("streams provider catalog results as each provider settles", async () => {
+    vi.stubEnv("MODEL_CATALOG_TIMEOUT_MS", "50");
+    const [hangingProvider, healthyProvider] = await Promise.all([
+      startFakeOpenAICompatibleServer({
+        chatResponses: [],
+        modelsHang: true,
+      }),
+      startFakeOpenAICompatibleServer({
+        chatResponses: [],
+        models: [{ id: "healthy-chat", context_length: 4096 }],
+      }),
+    ]);
+    fakeModels.push(hangingProvider, healthyProvider);
+    await db.insert(userSettings).values({
+      user_id: LOCAL_TOKEN_USER_ID,
+      custom_providers: JSON.stringify([
+        {
+          id: "hanging",
+          displayName: "Hanging Provider",
+          baseUrl: hangingProvider.url,
+        },
+        {
+          id: "healthy",
+          displayName: "Healthy Provider",
+          baseUrl: healthyProvider.url,
+        },
+      ]),
+    });
+
+    const response = await GET(
+      new NextRequest("http://localhost/api/models?stream=1"),
+    );
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    expect(response.headers.get("content-type")).toContain("application/x-ndjson");
+    expect(events[0]).toMatchObject({ type: "metadata" });
+    expect(events[1]).toMatchObject({
+      type: "provider",
+      provider: {
+        providerId: "healthy",
+        status: "ok",
+      },
+    });
+    expect(events[2]).toMatchObject({
+      type: "provider",
+      provider: {
+        providerId: "hanging",
+        status: "unavailable",
+      },
+    });
+    expect(events.at(-1)).toMatchObject({
+      type: "done",
+      catalog: {
+        models: [expect.objectContaining({ id: "custom:healthy:healthy-chat" })],
+      },
+    });
+  });
 });
