@@ -13,6 +13,9 @@ One entry in a Conversation: a user prompt (text, optionally with image attachme
 ### Tool Call
 A single operation the assistant performs against the TYPO3 instance (read or write) during a response. Tool Calls are visible to the editor inline in the transcript and in the Activity view.
 
+### Web Search
+An assistant capability for consulting the public internet during a Chat Turn when the editor asks for current, external, or source-backed information. Web Search is distinct from Conversation search and TYPO3 MCP Search.
+
 ### Write Operation
 A Tool Call that changes TYPO3 state (as opposed to inspecting it). Write Operations are subject to Write Approval.
 

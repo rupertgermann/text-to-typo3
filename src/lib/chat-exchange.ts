@@ -22,6 +22,7 @@ import {
   resolveChatTurn,
   type ChatTurnTrigger,
 } from "@/lib/chat-turn-resolution";
+import { addWebSearchTool } from "@/lib/chat-tools";
 import {
   createModelTitleGenerator,
   persistResponseMessage,
@@ -39,6 +40,8 @@ import { getResolvedUserSettings } from "@/lib/user-settings";
 import { normalizeLanguageModelUsage } from "@/lib/token-usage";
 
 const SYSTEM_PROMPT = `You are a helpful assistant for TYPO3 CMS. You help users manage their TYPO3 website by answering questions, providing guidance, and assisting with content management tasks. Be concise, accurate, and helpful. When discussing TYPO3-specific features, refer to the correct TYPO3 version terminology and best practices. Use TYPO3 MCP tools when you need live site data or need to modify TYPO3 content. Default writes to TYPO3 workspaces, and ask for confirmation before broad changes that affect many records.
+
+Use Web Search when a request depends on current public information, external facts outside the TYPO3 instance, or source-backed answers. Prefer TYPO3 MCP tools over Web Search for facts about the connected TYPO3 site.
 
 When a user asks you to create or update TYPO3 content and an appropriate write tool is available, continue until the requested TYPO3 change is actually completed or you hit a real blocking error that cannot be resolved from the available tool outputs.
 
@@ -164,6 +167,8 @@ export async function streamChatExchange({
   } catch (error) {
     return upstreamError(getChatErrorMessage(error, "mcp"));
   }
+
+  tools = addWebSearchTool({ providerResolution, tools });
 
   const result = streamText({
     model: providerResolution.model,

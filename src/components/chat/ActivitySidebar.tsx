@@ -35,7 +35,7 @@ export function ActivitySidebar({ messages }: { messages: UIMessage[] }) {
       <div className="flex items-center justify-between border-b border-border/70 px-4 py-4">
         <div>
           <div className="text-sm font-semibold">Activity</div>
-          <div className="text-xs text-muted-foreground">MCP tool calls in this conversation</div>
+          <div className="text-xs text-muted-foreground">Tool calls in this conversation</div>
         </div>
       </div>
 
