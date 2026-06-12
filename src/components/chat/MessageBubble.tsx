@@ -36,7 +36,7 @@ const markdownComponents: Components = {
       return (
         <code
           {...rest}
-          className="rounded bg-background/70 px-1 py-0.5 font-mono text-sm"
+          className="rounded bg-background/70 px-1 py-0.5 font-mono text-sm text-foreground"
         >
           {children}
         </code>
@@ -44,9 +44,23 @@ const markdownComponents: Components = {
     }
 
     return (
-      <code {...rest} className={className}>
+      <code
+        {...rest}
+        className={cn(
+          className,
+          "font-mono text-[0.8125rem] leading-5 text-card-foreground",
+        )}
+      >
         {children}
       </code>
+    );
+  },
+  pre(props) {
+    return (
+      <pre
+        {...props}
+        className="overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-border/70 bg-card p-3 font-mono text-card-foreground shadow-sm"
+      />
     );
   },
   table(props) {
@@ -115,7 +129,7 @@ function MessageBubbleComponent({
     >
       <div
         className={cn(
-          "max-w-[85%] space-y-3 rounded-2xl px-4 py-2.5 text-sm",
+          "min-w-0 max-w-full space-y-3 rounded-2xl px-4 py-2.5 text-sm md:max-w-[85%]",
           isUser
             ? "rounded-br-sm bg-primary text-primary-foreground"
             : "rounded-bl-sm bg-muted text-foreground",
@@ -177,7 +191,7 @@ function MessageBubbleComponent({
             ) : (
               <div
                 key={index}
-                className="prose prose-sm max-w-none dark:prose-invert prose-pre:overflow-x-auto prose-pre:rounded-md prose-pre:bg-muted prose-pre:p-3"
+                className="prose prose-sm min-w-0 max-w-none break-words dark:prose-invert prose-pre:m-0 prose-pre:bg-card prose-pre:p-3 prose-code:before:content-none prose-code:after:content-none"
               >
                 <ReactMarkdown
                   remarkPlugins={markdownRemarkPlugins}

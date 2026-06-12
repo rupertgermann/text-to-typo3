@@ -131,6 +131,14 @@ function safeStringify(value: unknown): string {
   }
 }
 
+function JsonBlock({ value }: { value: unknown }) {
+  return (
+    <pre className="max-w-full overflow-hidden whitespace-pre-wrap break-words rounded-md border border-current/10 bg-background/70 p-3 font-mono text-xs leading-5">
+      <code className="break-words">{safeStringify(value)}</code>
+    </pre>
+  );
+}
+
 export function ToolCallCard({
   part,
   defaultOpen = false,
@@ -158,16 +166,18 @@ export function ToolCallCard({
   const inputObject = useMemo(() => parseObjectInput(part.input), [part.input]);
   const targetTable =
     typeof inputObject?.table === "string" ? inputObject.table : null;
-  const fieldPayload = inputObject && "data" in inputObject
-    ? inputObject.data
-    : undefined;
+  const fieldPayload =
+    inputObject && "data" in inputObject ? inputObject.data : undefined;
   const approvalLabel = getApprovalLabel(part);
 
   const toneClasses = {
-    read: "border-sky-200 bg-sky-50/70 text-sky-950",
-    write: "border-amber-200 bg-amber-50/80 text-amber-950",
-    error: "border-red-200 bg-red-50/80 text-red-950",
-    unknown: "border-border bg-muted/40 text-foreground",
+    read: "border-sky-200 bg-sky-50/70 text-sky-950 dark:border-sky-400/35 dark:bg-sky-950/30 dark:text-sky-100",
+    write:
+      "border-amber-200 bg-amber-50/80 text-amber-950 dark:border-amber-400/40 dark:bg-amber-950/35 dark:text-amber-100",
+    error:
+      "border-red-200 bg-red-50/80 text-red-950 dark:border-red-400/40 dark:bg-red-950/35 dark:text-red-100",
+    unknown:
+      "border-border bg-muted/40 text-foreground dark:bg-muted/50",
   }[operation];
 
   const output = part.output && typeof part.output === "object"
@@ -182,7 +192,7 @@ export function ToolCallCard({
     <div
       id={`tool-call-${part.toolCallId}`}
       className={cn(
-        "scroll-mt-8 rounded-xl border transition-shadow",
+        "min-w-0 scroll-mt-8 overflow-hidden rounded-xl border transition-shadow",
         toneClasses,
         isPendingApproval &&
           "border-amber-500 ring-2 ring-amber-400/70 shadow-lg shadow-amber-950/10",
@@ -196,16 +206,22 @@ export function ToolCallCard({
           compact ? "text-xs" : "text-sm",
         )}
       >
-        <div className="flex min-w-0 items-center gap-2">
-          {isOpen ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
-          <span className="truncate font-medium">{part.title || toolName}</span>
-          <span className="rounded-full border border-current/15 px-2 py-0.5 text-[10px] uppercase tracking-wide opacity-75">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {isOpen ? (
+            <ChevronDown className="h-4 w-4 shrink-0" />
+          ) : (
+            <ChevronRight className="h-4 w-4 shrink-0" />
+          )}
+          <span className="min-w-0 max-w-full truncate font-medium">
+            {part.title || toolName}
+          </span>
+          <span className="shrink-0 rounded-full border border-current/15 px-2 py-0.5 text-[10px] uppercase tracking-wide opacity-75">
             {approvalLabel}
           </span>
         </div>
 
         {backendRecordUrl ? (
-          <span className="inline-flex items-center gap-1 text-[11px] opacity-80">
+          <span className="hidden shrink-0 items-center gap-1 text-[11px] opacity-80 sm:inline-flex">
             Record link
             <ExternalLink className="h-3 w-3" />
           </span>
@@ -213,35 +229,36 @@ export function ToolCallCard({
       </button>
 
       {isOpen ? (
-        <div className={cn("space-y-3 border-t border-current/10 px-3 py-3", compact ? "text-xs" : "text-sm")}>
+        <div
+          className={cn(
+            "space-y-3 border-t border-current/10 px-3 py-3",
+            compact ? "text-xs" : "text-sm",
+          )}
+        >
           {targetTable || fieldPayload !== undefined ? (
-            <div className="grid gap-2 md:grid-cols-2">
+            <div className="grid min-w-0 gap-2 md:grid-cols-2">
               {targetTable ? (
-                <div className="space-y-1">
+                <div className="min-w-0 space-y-1">
                   <div className="font-medium opacity-80">Table</div>
-                  <div className="rounded-md bg-background/70 p-3 text-xs">
+                  <div className="break-words rounded-md bg-background/70 p-3 text-xs">
                     {targetTable}
                   </div>
                 </div>
               ) : null}
 
               {fieldPayload !== undefined ? (
-                <div className="space-y-1">
+                <div className="min-w-0 space-y-1">
                   <div className="font-medium opacity-80">Payload</div>
-                  <pre className="overflow-x-auto rounded-md bg-background/70 p-3 text-xs">
-                    <code>{safeStringify(fieldPayload)}</code>
-                  </pre>
+                  <JsonBlock value={fieldPayload} />
                 </div>
               ) : null}
             </div>
           ) : null}
 
           {part.input !== undefined ? (
-            <div className="space-y-1">
+            <div className="min-w-0 space-y-1">
               <div className="font-medium opacity-80">Input</div>
-              <pre className="overflow-x-auto rounded-md bg-background/70 p-3 text-xs">
-                <code>{safeStringify(part.input)}</code>
-              </pre>
+              <JsonBlock value={part.input} />
             </div>
           ) : null}
 
@@ -253,11 +270,9 @@ export function ToolCallCard({
           ) : null}
 
           {output !== undefined ? (
-            <div className="space-y-1">
+            <div className="min-w-0 space-y-1">
               <div className="font-medium opacity-80">Output</div>
-              <pre className="overflow-x-auto rounded-md bg-background/70 p-3 text-xs">
-                <code>{safeStringify(output)}</code>
-              </pre>
+              <JsonBlock value={output} />
             </div>
           ) : null}
 
@@ -271,7 +286,9 @@ export function ToolCallCard({
             </div>
           ) : null}
 
-          {part.state === "approval-requested" && part.approval && onApprovalResponse ? (
+          {part.state === "approval-requested" &&
+          part.approval &&
+          onApprovalResponse ? (
             <div className="space-y-2 rounded-md bg-background/70 p-3">
               <textarea
                 value={rejectionReason}
