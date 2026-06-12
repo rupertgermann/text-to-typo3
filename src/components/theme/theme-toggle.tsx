@@ -5,6 +5,7 @@ import { useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
 
 const STORAGE_KEY = "text-to-typo3-theme";
+const COOKIE_KEY = "text-to-typo3-theme";
 type Theme = "light" | "dark";
 const themeListeners = new Set<() => void>();
 
@@ -48,6 +49,7 @@ function notifyThemeListeners() {
 function applyTheme(theme: Theme) {
   syncDocumentTheme(theme);
   window.localStorage.setItem(STORAGE_KEY, theme);
+  document.cookie = `${COOKIE_KEY}=${theme}; path=/; max-age=31536000; samesite=lax`;
   notifyThemeListeners();
 }
 
