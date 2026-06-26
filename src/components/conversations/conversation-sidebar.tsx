@@ -79,10 +79,10 @@ function ConversationPanel({
   setEditingTitle: (value: string) => void;
 }) {
   return (
-    <div className="flex h-full min-h-0 flex-col border-r border-border/70 bg-sidebar/90 backdrop-blur">
-      <div className="border-b border-border/70 px-4 py-5">
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-col border-r border-border/70 bg-sidebar/90 backdrop-blur">
+      <div className="min-w-0 border-b border-border/70 px-4 py-5">
         <div className="flex items-center justify-between gap-2">
-          <div>
+          <div className="min-w-0">
             <p className="text-sm font-semibold tracking-wide">Conversations</p>
             <p className="text-xs text-muted-foreground">
               Search, rename, and manage your chats
@@ -99,7 +99,7 @@ function ConversationPanel({
           </Button>
         </div>
 
-        <div className="mt-4 flex items-center gap-2 rounded-2xl border border-border/70 bg-card/80 px-3 shadow-sm">
+        <div className="mt-4 flex w-full min-w-0 items-center gap-2 rounded-2xl border border-border/70 bg-card/80 px-3 shadow-sm">
           <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
           <Input
             value={query}
@@ -113,8 +113,8 @@ function ConversationPanel({
         ) : null}
       </div>
 
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="space-y-2 p-3">
+      <ScrollArea className="min-h-0 min-w-0 flex-1">
+        <div className="min-w-0 space-y-2 p-3">
           {isLoading ? (
             <div className="rounded-xl border border-dashed px-3 py-4 text-sm text-muted-foreground">
               Loading conversations...
@@ -132,7 +132,7 @@ function ConversationPanel({
                 <div
                   key={conversation.id}
                   className={cn(
-                    "group flex items-start gap-2 rounded-xl border px-3 py-2 transition-colors",
+                    "group flex min-w-0 items-start gap-2 rounded-xl border px-3 py-2 transition-colors",
                     isActive
                       ? "border-primary/40 bg-primary/8 shadow-sm"
                       : "border-transparent hover:border-border/80 hover:bg-card/80",
@@ -167,7 +167,7 @@ function ConversationPanel({
                       />
                     ) : (
                       <>
-                        <span className="truncate text-sm font-medium">
+                        <span className="block w-full truncate text-sm font-medium">
                           {conversation.title}
                         </span>
                         <span className="text-xs text-muted-foreground">
@@ -177,7 +177,7 @@ function ConversationPanel({
                     )}
                   </button>
 
-                  <div className="flex items-center gap-1 opacity-100 transition-opacity lg:opacity-0 lg:group-hover:opacity-100">
+                  <div className="flex shrink-0 items-center gap-1 opacity-100 transition-opacity lg:opacity-0 lg:group-hover:opacity-100">
                     <Button
                       type="button"
                       variant="ghost"
@@ -352,7 +352,7 @@ export function ConversationSidebar({
     <>
       <aside
         className={cn(
-          "hidden h-full min-h-0 w-80 shrink-0 lg:flex",
+          "hidden h-full min-h-0 w-80 min-w-0 max-w-[20rem] shrink-0 lg:flex",
           className,
         )}
       >
@@ -371,7 +371,10 @@ export function ConversationSidebar({
       </Button>
 
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-        <SheetContent side="left" className="w-[min(22rem,100vw)] p-0">
+        <SheetContent
+          side="left"
+          className="w-[min(22rem,100vw)] min-w-0 max-w-[100vw] p-0"
+        >
           <SheetHeader className="border-b px-4 py-4">
             <SheetTitle>Conversations</SheetTitle>
           </SheetHeader>
