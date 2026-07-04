@@ -4,76 +4,19 @@ import { useMemo, useState } from "react";
 import { Check, ChevronDown, ChevronRight, ExternalLink, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import {
+  buildWorkspaceModuleUrl,
+  collectPublicUrlAssets,
+  getBackendRecordUrl,
+  getOperationType,
+  getToolName,
+  isSuccessfulWorkspaceWrite,
+  stripToolOutputMeta,
+  type GenericToolPart,
+  type PublicUrlAsset,
+} from "./tool-rendering";
 
-type ToolState =
-  | "input-streaming"
-  | "input-available"
-  | "approval-requested"
-  | "approval-responded"
-  | "output-available"
-  | "output-error"
-  | "output-denied";
-
-export interface GenericToolPart {
-  type: string;
-  toolCallId: string;
-  state: ToolState;
-  input?: unknown;
-  output?: unknown;
-  errorText?: string;
-  approval?: {
-    id: string;
-    approved?: boolean;
-    reason?: string;
-  };
-  providerExecuted?: boolean;
-  title?: string;
-  toolName?: string;
-}
-
-function getToolName(part: GenericToolPart): string {
-  if (part.toolName) {
-    return part.toolName;
-  }
-
-  return part.type.replace(/^tool-/, "");
-}
-
-function getOperationType(part: GenericToolPart): "read" | "write" | "error" | "unknown" {
-  if (part.state === "output-error") {
-    return "error";
-  }
-
-  const meta =
-    part.output && typeof part.output === "object"
-      ? (part.output as { _meta?: { operation?: string } })._meta
-      : undefined;
-
-  if (meta?.operation === "read" || meta?.operation === "write") {
-    return meta.operation;
-  }
-
-  const toolName = getToolName(part);
-
-  if (/write|create|update|delete|translate/i.test(toolName)) {
-    return "write";
-  }
-
-  if (/get|read|search|list/i.test(toolName)) {
-    return "read";
-  }
-
-  return "unknown";
-}
-
-function getBackendRecordUrl(part: GenericToolPart): string | null {
-  if (!part.output || typeof part.output !== "object") {
-    return null;
-  }
-
-  const meta = (part.output as { _meta?: { backendRecordUrl?: string | null } })._meta;
-  return meta?.backendRecordUrl || null;
-}
+export type { GenericToolPart } from "./tool-rendering";
 
 function parseObjectInput(input: unknown): Record<string, unknown> | null {
   if (input && typeof input === "object" && !Array.isArray(input)) {
@@ -144,12 +87,14 @@ export function ToolCallCard({
   defaultOpen = false,
   compact = false,
   isPendingApproval = false,
+  typo3BaseUrl = "",
   onApprovalResponse,
 }: {
   part: GenericToolPart;
   defaultOpen?: boolean;
   compact?: boolean;
   isPendingApproval?: boolean;
+  typo3BaseUrl?: string;
   onApprovalResponse?: (response: {
     approved: boolean;
     id: string;
@@ -163,6 +108,14 @@ export function ToolCallCard({
   const toolName = useMemo(() => getToolName(part), [part]);
   const operation = useMemo(() => getOperationType(part), [part]);
   const backendRecordUrl = useMemo(() => getBackendRecordUrl(part), [part]);
+  const workspaceModuleUrl = useMemo(
+    () => buildWorkspaceModuleUrl(typo3BaseUrl),
+    [typo3BaseUrl],
+  );
+  const isQueuedWorkspaceWrite = useMemo(
+    () => isSuccessfulWorkspaceWrite(part),
+    [part],
+  );
   const inputObject = useMemo(() => parseObjectInput(part.input), [part.input]);
   const targetTable =
     typeof inputObject?.table === "string" ? inputObject.table : null;
@@ -176,17 +129,13 @@ export function ToolCallCard({
       "border-amber-200 bg-amber-50/80 text-amber-950 dark:border-amber-400/40 dark:bg-amber-950/35 dark:text-amber-100",
     error:
       "border-red-200 bg-red-50/80 text-red-950 dark:border-red-400/40 dark:bg-red-950/35 dark:text-red-100",
-    unknown:
-      "border-border bg-muted/40 text-foreground dark:bg-muted/50",
   }[operation];
 
-  const output = part.output && typeof part.output === "object"
-    ? Object.fromEntries(
-        Object.entries(part.output as Record<string, unknown>).filter(
-          ([key]) => key !== "_meta",
-        ),
-      )
-    : part.output;
+  const output = useMemo(() => stripToolOutputMeta(part.output), [part.output]);
+  const publicUrlAssets = useMemo(
+    () => collectPublicUrlAssets(output, typo3BaseUrl),
+    [output, typo3BaseUrl],
+  );
 
   return (
     <div
@@ -227,6 +176,21 @@ export function ToolCallCard({
           </span>
         ) : null}
       </button>
+
+      {isQueuedWorkspaceWrite && workspaceModuleUrl ? (
+        <div className="flex flex-wrap items-center gap-2 border-t border-current/10 bg-background/45 px-3 py-2 text-xs">
+          <span className="font-medium">Queued in workspace - not live yet.</span>
+          <a
+            href={workspaceModuleUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 underline underline-offset-2 hover:no-underline"
+          >
+            Open workspace module
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        </div>
+      ) : null}
 
       {isOpen ? (
         <div
@@ -272,6 +236,9 @@ export function ToolCallCard({
           {output !== undefined ? (
             <div className="min-w-0 space-y-1">
               <div className="font-medium opacity-80">Output</div>
+              {publicUrlAssets.length > 0 ? (
+                <PublicUrlList assets={publicUrlAssets} />
+              ) : null}
               <JsonBlock value={output} />
             </div>
           ) : null}
@@ -329,6 +296,55 @@ export function ToolCallCard({
             </div>
           ) : null}
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PublicUrlList({ assets }: { assets: PublicUrlAsset[] }) {
+  return (
+    <div className="mb-2 grid min-w-0 gap-2">
+      {assets.map((asset) => (
+        <PublicUrlPreview key={asset.href} asset={asset} />
+      ))}
+    </div>
+  );
+}
+
+function PublicUrlPreview({ asset }: { asset: PublicUrlAsset }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const showThumbnail = Boolean(asset.thumbnailUrl && !imageFailed);
+
+  return (
+    <div className="min-w-0 rounded-md border border-current/10 bg-background/70 p-2">
+      {showThumbnail ? (
+        <a
+          href={asset.href}
+          target="_blank"
+          rel="noreferrer"
+          className="mb-2 block"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={asset.thumbnailUrl ?? undefined}
+            alt={asset.displayName}
+            loading="lazy"
+            onError={() => setImageFailed(true)}
+            className="max-h-40 max-w-full rounded-md border border-border/60 bg-background object-contain"
+          />
+        </a>
+      ) : null}
+      <a
+        href={asset.href}
+        target="_blank"
+        rel="noreferrer"
+        className="inline-flex max-w-full items-center gap-1 break-all text-xs font-medium underline underline-offset-2 hover:no-underline"
+      >
+        <span className="min-w-0 truncate">{asset.displayName}</span>
+        <ExternalLink className="h-3 w-3 shrink-0" />
+      </a>
+      {asset.mimeType ? (
+        <div className="mt-1 text-[11px] opacity-70">{asset.mimeType}</div>
       ) : null}
     </div>
   );

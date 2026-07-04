@@ -33,22 +33,32 @@ The public package documentation for `hn/typo3-mcp-server` describes this backen
 
 ## TYPO3 MCP Capabilities Used By The App
 
-The chat interface is designed around the upstream TYPO3 MCP server toolset described in the TYPO3 MCP server repository:
+The chat interface is designed around the TYPO3 MCP server v0.4.4 toolset:
 
 - `GetPageTree`
 - `GetPage`
+- `Search`
 - `ListTables`
 - `ReadTable`
-- `Search`
 - `GetTableSchema`
 - `GetFlexFormSchema`
 - `WriteTable`
+
+The v0.4.4 server publishes rich tool descriptions and MCP tool annotations with `tools/list`. The app treats `annotations.readOnlyHint === true` as read-only and treats `readOnlyHint === false` or missing annotations as write-capable, so unannotated tools require write approval by default.
+
+The server descriptions are the source of truth for tool parameter mechanics, including search-and-replace edits, moving records through `pid`/position values, relation and file-reference handling, `fields` filtering, and translation actions. The app prompt only adds operating policy around approvals, context economy, workspace publishing, and retry behavior.
+
+`ReadTable` can expose file records such as `sys_file` with `public_url` values. The app renders those URLs as links and shows inline thumbnails for image files on the configured TYPO3 host.
+
+`WriteTable` queues changes in a TYPO3 workspace. Those changes are not live until an editor publishes the workspace in the TYPO3 backend. The app shows per-write workspace notes and a conversation-level pending-change count, but in-app publishing is not supported because the MCP server exposes no publish tool.
+
+Translation support is available through `WriteTable` but is experimental upstream. The assistant should only use translation workflows when the editor explicitly asks for translation work.
 
 The app supports multi-step MCP runs, so a single user request can read page context, inspect table schema, and continue into follow-up TYPO3 tool calls before the response is finalized. `TYPO3_AGENT_MAX_STEPS` controls the request-level step cap.
 
 OpenAI, LM Studio, and custom OpenAI-compatible models all use this toolset. The app routes provider requests differently where needed, but TYPO3-side MCP capabilities stay the same.
 
-Every MCP request uses a request-level timeout. Hung TYPO3 MCP endpoints return categorized API errors instead of leaving a chat request open indefinitely. MCP session IDs are cached with an expiry and refreshed transparently when the TYPO3 server rotates or expires a session.
+Every MCP request uses a request-level timeout. Hung TYPO3 MCP endpoints return categorized API errors instead of leaving a chat request open indefinitely. MCP session IDs are cached with a 25-minute safety window for the server's 30-minute session timeout and refreshed transparently when the TYPO3 server rotates or expires a session. The client sends the newest supported initialize protocol version and uses the protocol version returned by the server on later MCP requests.
 
 For content creation and updates, TYPO3 users should have:
 
@@ -56,7 +66,7 @@ For content creation and updates, TYPO3 users should have:
 - a writable workspace
 - permission to create and edit records in the target TYPO3 area
 
-The chat flow expects `WriteTable` create and update operations to accept a `data` object containing the field values to write. When TYPO3 returns validation feedback, the assistant can inspect schema details and retry with corrected input in the same response.
+When TYPO3 returns validation feedback, the assistant can inspect schema details and retry with corrected input in the same response.
 
 For LM Studio mutation requests, the tool loop is kept in tool-calling mode until a write succeeds or the request reaches the configured step limit, which helps local models avoid stopping after the first read tool call.
 

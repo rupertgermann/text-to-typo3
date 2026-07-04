@@ -17,7 +17,16 @@ A single operation the assistant performs against the TYPO3 instance (read or wr
 An assistant capability for consulting the public internet during a Chat Turn when the editor asks for current, external, or source-backed information. Web Search is distinct from Conversation search and TYPO3 MCP Search.
 
 ### Write Operation
-A Tool Call that changes TYPO3 state (as opposed to inspecting it). Write Operations are subject to Write Approval.
+A Tool Call that changes TYPO3 state (as opposed to inspecting it). Write Operations are subject to Write Approval. Classified from the server-sent Tool Annotation; a tool without an annotation is treated as a Write Operation.
+
+### Tool Annotation
+Metadata the TYPO3 MCP server declares per tool (read-only, idempotent). The authoritative source for deciding whether a Tool Call is a Write Operation.
+
+### Workspace
+The TYPO3 staging area where every Write Operation lands. Workspace changes are not live until an editor publishes them in the TYPO3 backend; the assistant cannot publish.
+
+### Pending Changes
+The per-Conversation count of executed Write Operations queued in the Workspace, surfaced with a link to the TYPO3 workspace module.
 
 ### Write Approval
 The editor's explicit consent required before a Write Operation executes. While approval is pending, the assistant's work on that operation is blocked until the editor approves or denies. A Conversation with auto-approve enabled skips this gate for its Write Operations.

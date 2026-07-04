@@ -171,6 +171,30 @@ Expected result:
 - Dry run prints the planned scaffold flow without writing TYPO3 resources.
 - A real run writes `.env.local`, scaffold state, and the generated scaffold summary.
 
+## 12. Live TYPO3 MCP v0.4.4 Smoke Checklist
+
+Run this checklist once against a real TYPO3 MCP v0.4.4 instance before publishing an alignment release.
+
+1. Open Settings and test the MCP connection.
+2. Ask `What tools does the TYPO3 MCP server offer?` and confirm the tool list includes `GetPageTree`, `GetPage`, `Search`, `ListTables`, `ReadTable`, `GetTableSchema`, `GetFlexFormSchema`, and `WriteTable`.
+3. Trigger a read flow that uses a `fields` filter, such as asking for only `uid`, `pid`, and `header` from `tt_content` records on a known page.
+4. Trigger a safe write flow with approval enabled, approve it, and confirm the tool card says the change is queued in the workspace and not live.
+5. Deny a second write request and confirm the conversation-level pending-change count does not increase.
+6. Trigger a search-and-replace edit in a safe draft record and confirm the assistant retries with schema/context if TYPO3 returns validation feedback.
+7. Trigger a record move by asking to move a draft content record within the same page or to another safe page.
+8. Read `sys_file` rows and confirm `public_url` values render as links; image files render lazy thumbnails, while non-image files remain links.
+9. Open the conversation-level workspace link and confirm the queued changes appear in the TYPO3 backend workspace module.
+10. Publish or discard the smoke-test changes in the TYPO3 backend. The app does not publish workspaces.
+11. In OAuth mode, complete login, send a TYPO3 read prompt, refresh the app, and confirm the session still works.
+
+Expected result:
+
+- Read-only tools execute without write approval.
+- `WriteTable` and any unannotated fixture or server tool require approval unless the conversation has auto-approve enabled.
+- Workspace notes and pending-change counts reflect only successful executed writes.
+- `public_url` links and image thumbnails render without requiring the editor to inspect raw JSON.
+- OAuth login and chat round-trip work against the v0.4.4 instance.
+
 
 ## test prompts
 
