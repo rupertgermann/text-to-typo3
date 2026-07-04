@@ -4,21 +4,19 @@ import { isToolUIPart, type UIMessage } from "ai";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ToolCallCard, type GenericToolPart } from "./ToolCallCard";
+import { getToolIntent } from "./tool-rendering";
 
 function getOperation(part: GenericToolPart): "read" | "write" | "all" {
-  const output =
-    part.output && typeof part.output === "object"
-      ? (part.output as { _meta?: { operation?: string } })._meta?.operation
-      : undefined;
-
-  if (output === "read" || output === "write") {
-    return output;
-  }
-
-  return /write|create|update|delete|translate/i.test(part.type) ? "write" : "read";
+  return getToolIntent(part);
 }
 
-export function ActivitySidebar({ messages }: { messages: UIMessage[] }) {
+export function ActivitySidebar({
+  messages,
+  typo3BaseUrl,
+}: {
+  messages: UIMessage[];
+  typo3BaseUrl: string;
+}) {
   const [filter, setFilter] = useState<"all" | "read" | "write">("all");
 
   const toolParts = useMemo(
@@ -58,7 +56,13 @@ export function ActivitySidebar({ messages }: { messages: UIMessage[] }) {
           </div>
         ) : (
           toolParts.map((part) => (
-            <ToolCallCard key={part.toolCallId} part={part as GenericToolPart} compact defaultOpen={false} />
+            <ToolCallCard
+              key={part.toolCallId}
+              part={part as GenericToolPart}
+              compact
+              defaultOpen={false}
+              typo3BaseUrl={typo3BaseUrl}
+            />
           ))
         )}
       </div>

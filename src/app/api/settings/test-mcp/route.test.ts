@@ -38,7 +38,7 @@ describe("MCP connection test route", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body).toEqual({ ok: true, toolCount: 4 });
+    expect(body).toEqual({ ok: true, toolCount: 9 });
     expect(JSON.stringify(body)).not.toContain("secret-token");
   });
 

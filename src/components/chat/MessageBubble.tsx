@@ -16,6 +16,7 @@ interface MessageBubbleProps {
   allowEdit?: boolean;
   allowRegenerate?: boolean;
   pendingApprovalToolCallIds?: ReadonlySet<string>;
+  typo3BaseUrl: string;
   onEdit?: () => void;
   onRegenerate?: () => void;
   onToolApprovalResponse?: (response: {
@@ -77,6 +78,7 @@ function MessageBubbleComponent({
   allowEdit = true,
   allowRegenerate = false,
   pendingApprovalToolCallIds,
+  typo3BaseUrl,
   onEdit,
   onRegenerate,
   onToolApprovalResponse,
@@ -235,6 +237,7 @@ function MessageBubbleComponent({
                 key={part.toolCallId}
                 part={part as GenericToolPart}
                 isPendingApproval={pendingApprovalToolCallIds?.has(part.toolCallId)}
+                typo3BaseUrl={typo3BaseUrl}
                 onApprovalResponse={onToolApprovalResponse}
               />
             );
@@ -265,6 +268,7 @@ function areMessageBubblePropsEqual(
   return (
     previous.allowEdit === next.allowEdit &&
     previous.allowRegenerate === next.allowRegenerate &&
+    previous.typo3BaseUrl === next.typo3BaseUrl &&
     areSetsEqual(
       previous.pendingApprovalToolCallIds,
       next.pendingApprovalToolCallIds,

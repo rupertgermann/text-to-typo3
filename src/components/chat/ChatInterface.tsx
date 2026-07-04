@@ -14,6 +14,7 @@ import type { Message } from "@/lib/db/schema";
 import { ActivitySidebar } from "./ActivitySidebar";
 import {
   FilePlus2,
+  ExternalLink,
   ImagePlus,
   Languages,
   Loader2,
@@ -45,11 +46,13 @@ import {
   isNearChatBottom,
 } from "./chat-scroll";
 import { derivePendingApprovals } from "@/lib/pending-approvals";
+import { deriveQueuedWorkspaceChanges } from "./tool-rendering";
 
 interface ChatInterfaceProps {
   initialAutoApproveWrites: boolean;
   conversationId: string;
   initialMessages: Message[];
+  typo3BaseUrl: string;
 }
 
 type PendingAttachment = {
@@ -109,6 +112,7 @@ export function ChatInterface({
   initialAutoApproveWrites,
   conversationId,
   initialMessages,
+  typo3BaseUrl,
 }: ChatInterfaceProps) {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
@@ -155,6 +159,10 @@ export function ChatInterface({
     [pendingApprovals],
   );
   const firstPendingApproval = pendingApprovals[0] ?? null;
+  const queuedWorkspaceChanges = useMemo(
+    () => deriveQueuedWorkspaceChanges(messages, typo3BaseUrl),
+    [messages, typo3BaseUrl],
+  );
 
   const handleTranscriptScroll = useCallback(() => {
     const viewport = transcriptViewportRef.current;
@@ -363,32 +371,60 @@ export function ChatInterface({
   return (
     <div className="flex flex-1 overflow-hidden">
       <div className="flex flex-1 flex-col overflow-hidden">
-        <div className="flex items-center justify-end gap-2 border-b border-border/70 bg-background/60 px-4 py-3 backdrop-blur">
-          <Button
-            type="button"
-            size="sm"
-            variant={autoApproveWrites ? "default" : "outline"}
-            className={autoApproveWrites ? "" : "bg-card/80"}
-            onClick={() => void toggleAutoApproveWrites()}
-            disabled={savingAutoApproveWrites || isLoading}
-          >
-            {savingAutoApproveWrites ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : (
-              <ShieldCheck className="mr-2 h-4 w-4" />
-            )}
-            Auto-approve writes
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="bg-card/80"
-            onClick={() => setShowActivity((open) => !open)}
-          >
-            <PanelRight className="mr-2 h-4 w-4" />
-            Activity
-          </Button>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 bg-background/60 px-4 py-3 backdrop-blur">
+          <div className="min-w-0">
+            {queuedWorkspaceChanges.count > 0 ? (
+              queuedWorkspaceChanges.workspaceModuleUrl ? (
+                <a
+                  href={queuedWorkspaceChanges.workspaceModuleUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex max-w-full items-center gap-1 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-950 shadow-sm hover:bg-amber-100 dark:border-amber-500/60 dark:bg-amber-950/40 dark:text-amber-100 dark:hover:bg-amber-950/60"
+                >
+                  <span className="truncate">
+                    {queuedWorkspaceChanges.count}{" "}
+                    {queuedWorkspaceChanges.count === 1 ? "change" : "changes"}{" "}
+                    queued in workspace
+                  </span>
+                  <ExternalLink className="h-3 w-3 shrink-0" />
+                </a>
+              ) : (
+                <div className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-950 dark:border-amber-500/60 dark:bg-amber-950/40 dark:text-amber-100">
+                  {queuedWorkspaceChanges.count}{" "}
+                  {queuedWorkspaceChanges.count === 1 ? "change" : "changes"}{" "}
+                  queued in workspace
+                </div>
+              )
+            ) : null}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant={autoApproveWrites ? "default" : "outline"}
+              className={autoApproveWrites ? "" : "bg-card/80"}
+              onClick={() => void toggleAutoApproveWrites()}
+              disabled={savingAutoApproveWrites || isLoading}
+            >
+              {savingAutoApproveWrites ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <ShieldCheck className="mr-2 h-4 w-4" />
+              )}
+              Auto-approve writes
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="bg-card/80"
+              onClick={() => setShowActivity((open) => !open)}
+            >
+              <PanelRight className="mr-2 h-4 w-4" />
+              Activity
+            </Button>
+          </div>
         </div>
 
         <div
@@ -456,6 +492,7 @@ export function ChatInterface({
                   }
                   onToolApprovalResponse={handleToolApprovalResponse}
                   pendingApprovalToolCallIds={pendingApprovalToolCallIds}
+                  typo3BaseUrl={typo3BaseUrl}
                 />
               ))
             )}
@@ -682,7 +719,9 @@ export function ChatInterface({
         </div>
       </div>
 
-      {showActivity ? <ActivitySidebar messages={messages} /> : null}
+      {showActivity ? (
+        <ActivitySidebar messages={messages} typo3BaseUrl={typo3BaseUrl} />
+      ) : null}
     </div>
   );
 }

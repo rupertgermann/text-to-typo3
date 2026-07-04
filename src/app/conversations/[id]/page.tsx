@@ -108,8 +108,9 @@ export default async function ConversationPage({
           conversationId={id}
           initialAutoApproveWrites={Boolean(conversation.auto_approve_writes)}
           initialMessages={conversation.messages}
+          typo3BaseUrl={env.TYPO3_BASE_URL}
         />
-        </div>
+      </div>
     </div>
   );
 }

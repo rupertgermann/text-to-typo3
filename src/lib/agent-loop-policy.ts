@@ -82,13 +82,20 @@ export function isTypo3MutationRequest(text: string): boolean {
 }
 
 export function isWriteToolName(toolName: string): boolean {
-  return /write|create|update|delete|translate/i.test(toolName);
+  return toolName === "WriteTable";
 }
 
 export function hasSuccessfulWriteResult(steps: AgentLoopStep[]): boolean {
   return steps.some((step) =>
     (step.toolResults ?? []).some((toolResult) => {
-      if (!isWriteToolName(toolResult.toolName)) {
+      const outputOperation =
+        toolResult.output && typeof toolResult.output === "object"
+          ? (toolResult.output as { _meta?: { operation?: string } })._meta?.operation
+          : undefined;
+      const isWrite =
+        outputOperation === "write" || isWriteToolName(toolResult.toolName);
+
+      if (!isWrite) {
         return false;
       }
 

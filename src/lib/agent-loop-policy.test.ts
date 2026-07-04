@@ -95,4 +95,22 @@ describe("agent loop policy", () => {
       }),
     ).toBeUndefined();
   });
+
+  it("uses operation metadata to detect successful writes", () => {
+    expect(
+      hasSuccessfulWriteResult([
+        {
+          toolResults: [
+            {
+              toolName: "AnnotatedDangerousTool",
+              output: {
+                uid: 123,
+                _meta: { operation: "write" },
+              },
+            },
+          ],
+        },
+      ]),
+    ).toBe(true);
+  });
 });
