@@ -118,7 +118,7 @@ export const PATCH = withAuth(async (request: NextRequest, auth) => {
           ? getOpenAIModelContextWindowHint(selectedModelId) ??
             (await listAvailableModelsForUser(auth.user.id)).models.find(
               (model) => model.id === selectedModelId,
-            )?.contextWindow ?? null
+            )?.contextWindow ?? expected.model_context_window
           : null;
         updated = await updateModelContextWindow(expected, modelContextWindow);
       }

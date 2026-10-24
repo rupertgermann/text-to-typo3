@@ -80,8 +80,8 @@ async function resolveAccessToken(sessionId: string): Promise<string | null> {
 
   const now = Math.floor(Date.now() / 1000);
 
-  // If token is still valid (with 60s buffer), return it
-  if (session.expires_at && session.expires_at > now + 60) {
+  const refreshMargin = session.refresh_token ? 60 : 0;
+  if (session.expires_at && session.expires_at > now + refreshMargin) {
     return decrypt(session.access_token);
   }
 
