@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { deferred } from "@/test/deferred";
 import {
   getMcpTools,
   createMcpExecution,
@@ -100,6 +101,31 @@ describe("MCP uncertain write execution", () => {
     resetMcpCachesForTests();
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
+  });
+
+  it("does not dispatch a write stopped while its MCP session refreshes", async () => {
+    fakeMcp = await startFakeMcpServer();
+    stubTokenAuthEnv({ mcpUrl: fakeMcp.url });
+    const controller = new AbortController();
+    const tools = await getMcpTools({ sessionId: "expired", accessToken: "", execution: createMcpExecution(controller.signal) });
+    resetMcpCachesForTests();
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await realFetch(input, init);
+      if (String(init?.body).includes('"initialize"')) {
+        entered.resolve();
+        await resume.promise;
+      }
+      return response;
+    });
+    const writing = tools.WriteTable.execute?.({ action: "create", table: "pages" }, { messages: [], toolCallId: "stopped" });
+    await entered.promise;
+    controller.abort();
+    resume.resolve();
+    expect(await writing).toMatchObject({ isError: true, _meta: { operation: "write", outcome: "blocked" } });
+    expect(fakeMcp.toolCalls).toHaveLength(0);
   });
 
   it.each(["lost response", "malformed result"])("serializes writes after %s and isolates the next exchange", async (failure) => {

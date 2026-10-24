@@ -37,6 +37,7 @@ export const POST = withAuth(async (request: NextRequest, auth) => {
     auth,
     conversationId,
     messageId,
+    signal: request.signal,
     trigger,
     uiMessages: incomingMessages as UIMessage[],
   });
