@@ -19,6 +19,8 @@ type QuerySnapshot<T> = {
 type QueryEntry<T> = QuerySnapshot<T> & {
   fetcher: (() => Promise<T>) | null;
   inFlight: Promise<T> | null;
+  generation: number;
+  refreshRequested: boolean;
   listeners: Set<() => void>;
 };
 
@@ -81,6 +83,8 @@ export function createClientQueryStore() {
         ...emptySnapshot,
         fetcher: null,
         inFlight: null,
+        generation: 0,
+        refreshRequested: false,
         listeners: new Set(),
       };
       entries.set(serializedKey, entry as QueryEntry<unknown>);
@@ -131,27 +135,44 @@ export function createClientQueryStore() {
     entry.isLoading = !entry.hasData;
     entry.isRefreshing = entry.hasData;
     entry.error = null;
+    let resolveRequest!: (data: T) => void;
+    let rejectRequest!: (error: unknown) => void;
+    const request = new Promise<T>((resolve, reject) => {
+      resolveRequest = resolve;
+      rejectRequest = reject;
+    });
+    entry.inFlight = request;
     notify(entry as QueryEntry<unknown>);
 
-    const request = fetcher()
-      .then((data) => {
-        entry.data = data;
-        entry.hasData = true;
-        entry.error = null;
-        return data;
-      })
-      .catch((error: unknown) => {
-        entry.error = error instanceof Error ? error : new Error(String(error));
-        throw error;
-      })
-      .finally(() => {
+    async function readUntilCurrent() {
+      try {
+        while (true) {
+          entry.refreshRequested = false;
+          const generation = entry.generation;
+          try {
+            const data = await (entry.fetcher ?? fetcher)();
+            if (generation === entry.generation) {
+              entry.data = data;
+              entry.hasData = true;
+              entry.error = null;
+            }
+            if (!entry.refreshRequested) return data;
+          } catch (error: unknown) {
+            if (generation === entry.generation) {
+              entry.error = error instanceof Error ? error : new Error(String(error));
+            }
+            if (!entry.refreshRequested) throw error;
+          }
+        }
+      } finally {
         entry.inFlight = null;
         entry.isLoading = false;
         entry.isRefreshing = false;
         notify(entry as QueryEntry<unknown>);
-      });
+      }
+    }
 
-    entry.inFlight = request;
+    void readUntilCurrent().then(resolveRequest, rejectRequest);
     return request;
   }
 
@@ -165,6 +186,8 @@ export function createClientQueryStore() {
         return;
       }
 
+      entry.generation += 1;
+      entry.refreshRequested = true;
       requests.push(fetchQuery(serializedKey, entry.fetcher).catch(() => null));
     });
 
@@ -176,7 +199,7 @@ export function createClientQueryStore() {
     updater: (current: T | undefined) => T | undefined,
   ) {
     entries.forEach((entry, serializedKey) => {
-      if (!entry.hasData || !matcher(serializedKey)) {
+      if (!matcher(serializedKey)) {
         return;
       }
 
@@ -187,6 +210,8 @@ export function createClientQueryStore() {
 
       entry.data = nextData;
       entry.hasData = true;
+      entry.generation += 1;
+      entry.error = null;
       notify(entry);
     });
   }

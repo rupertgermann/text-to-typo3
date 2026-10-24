@@ -219,6 +219,7 @@ pnpm db:studio
 - The home route redirects to the latest conversation or creates a default one for first-time users.
 - Conversations are listed in a left sidebar, ordered by last activity.
 - Conversations can be created, renamed inline, deleted, searched with a debounced cached query, and exported as Markdown.
+- A conversation can be deleted after its active response has finished saving, so running TYPO3 changes keep their result history.
 - Sidebar results stay visible while background refreshes run, and same-key requests share in-flight fetches.
 - The first user prompt in a new conversation becomes the basis of the auto-generated title.
 
@@ -256,6 +257,7 @@ pnpm db:studio
 - Model providers are queried in parallel with per-provider status. Slow or unreachable providers appear as unavailable while other provider results stay usable.
 - Settings render saved values immediately while provider catalogs load in the background.
 - Settings can be saved after their draft has loaded. Background refreshes preserve edits in the open form, and closing the form clears unsaved API keys.
+- Editing and dismissal are disabled while Settings are saving. Reopening the form uses the latest successful save, even while a background refresh is pending.
 - Model provider connection tests stop after 10 seconds, including response-body reading, or when the request is canceled.
 - Context-window information is shown in model cards and persisted for chat budgeting.
 - The default selected model falls back to `gpt-5.4-mini` when no user preference is stored.

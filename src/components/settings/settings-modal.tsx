@@ -39,7 +39,9 @@ export function SettingsModal({
   });
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={(nextOpen) => {
+      if (!form.saving) setOpen(nextOpen);
+    }}>
       <DialogTrigger
         render={
           <Button variant="outline" size="sm" className="h-9 gap-2">
@@ -48,7 +50,10 @@ export function SettingsModal({
           </Button>
         }
       />
-      <DialogContent className="w-[min(72rem,calc(100vw-2rem))] max-w-none sm:max-w-none">
+      <DialogContent
+        showCloseButton={!form.saving}
+        className="w-[min(72rem,calc(100vw-2rem))] max-w-none sm:max-w-none"
+      >
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
           <DialogDescription>
@@ -57,7 +62,10 @@ export function SettingsModal({
         </DialogHeader>
 
         <ScrollArea className="max-h-[70vh] pr-2">
-          <div className="space-y-6 pb-2">
+          <fieldset
+            disabled={form.saving || !form.draftInitialized}
+            className="min-w-0 space-y-6 pb-2"
+          >
             {form.settingsLoading ? (
               <div className="flex items-center gap-2 rounded-xl border px-3 py-2 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -214,7 +222,7 @@ export function SettingsModal({
                 {form.error}
               </div>
             ) : null}
-          </div>
+          </fieldset>
         </ScrollArea>
 
         <DialogFooter>
