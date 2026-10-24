@@ -10,6 +10,7 @@ import {
 } from "@/lib/user-settings";
 import { listAvailableModelsForUser } from "@/lib/model-service";
 import { getOpenAIModelContextWindowHint } from "@/lib/models";
+import { parseCustomModelId } from "@/lib/chat-provider-resolution";
 
 type SettingsBody = {
   modelId?: unknown;
@@ -114,10 +115,15 @@ export const PATCH = withAuth(async (request: NextRequest, auth) => {
       const expected = await getUserSettingsRow(auth.user.id);
       if (expected) {
         const selectedModelId = expected.model_id;
+        const selectedProvider = parseCustomModelId(selectedModelId ?? "")
+          ? "custom"
+          : expected.lmstudio_base_url && selectedModelId === expected.lmstudio_model_id
+            ? "lmstudio"
+            : "openai";
         const modelContextWindow = selectedModelId
-          ? getOpenAIModelContextWindowHint(selectedModelId) ??
+          ? (selectedProvider === "openai" ? getOpenAIModelContextWindowHint(selectedModelId) : null) ??
             (await listAvailableModelsForUser(auth.user.id)).models.find(
-              (model) => model.id === selectedModelId,
+              (model) => model.id === selectedModelId && model.provider === selectedProvider,
             )?.contextWindow ?? expected.model_context_window
           : null;
         updated = await updateModelContextWindow(expected, modelContextWindow);

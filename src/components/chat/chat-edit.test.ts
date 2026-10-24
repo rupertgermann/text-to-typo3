@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { isValidElement, type ReactNode, type SetStateAction } from "react";
 import { Chat } from "@ai-sdk/react";
-import type { ChatTransport, UIMessage } from "ai";
+import { DefaultChatTransport, createUIMessageStreamResponse, type ChatTransport, type ChatOnFinishCallback, type UIMessage, type UIMessageChunk } from "ai";
 import { MessageBubble } from "./MessageBubble";
 import { ChatInterface } from "./ChatInterface";
 
-const hooks = vi.hoisted(() => ({ states: [] as unknown[], cursor: 0, chat: null as Chat<UIMessage> | null, onError: undefined as ((error: Error) => void) | undefined, initialError: undefined as Error | undefined }));
+const hooks = vi.hoisted(() => ({ states: [] as unknown[], cursor: 0, chat: null as Chat<UIMessage> | null, onError: undefined as ((error: Error) => void) | undefined, onFinish: undefined as ChatOnFinishCallback<UIMessage> | undefined, initialError: undefined as Error | undefined }));
 vi.mock("react", async (importOriginal) => ({
   ...await importOriginal<typeof import("react")>(),
   useState<T,>(initial: T | (() => T)) {
@@ -26,8 +26,9 @@ vi.mock("react", async (importOriginal) => ({
 }));
 vi.mock("@ai-sdk/react", async (importOriginal) => ({
   ...await importOriginal<typeof import("@ai-sdk/react")>(),
-  useChat: (options: { onError?: (error: Error) => void }) => {
+  useChat: (options: { onError?: (error: Error) => void; onFinish?: ChatOnFinishCallback<UIMessage> }) => {
     hooks.onError = options.onError;
+    hooks.onFinish = options.onFinish;
     const chat = hooks.chat;
     if (!chat) throw new Error("Chat fixture is missing");
     return { messages: chat.messages, status: chat.status, error: chat.error ?? hooks.initialError, sendMessage: chat.sendMessage, regenerate: chat.regenerate, stop: chat.stop, clearError: chat.clearError, addToolApprovalResponse: chat.addToolApprovalResponse, setMessages: (messages: UIMessage[]) => { chat.messages = messages; } };
@@ -231,4 +232,51 @@ it.each([false, true])("freezes image preparation and releases the guard after r
     expect(requests).toHaveLength(1);
   }
   expect(requests[0].messages[0].parts).toEqual([{ type: "text", text: "Send this image" }, { type: "file", mediaType: "image/png", filename: "new.png", url: "data:image/png;base64,bmV3" }]);
+});
+
+
+it.each(["missing credentials", "upstream unavailable"])("restores the previous answer and composer draft after %s blocks regeneration", async (failure) => {
+  const history: UIMessage[] = [
+    { id: "user", role: "user", parts: [{ type: "text", text: "Question" }] },
+    { id: "old-answer", role: "assistant", parts: [{ type: "text", text: "Keep this useful answer" }] },
+  ];
+  hooks.chat = new Chat<UIMessage>({
+    messages: history,
+    onError: (error) => hooks.onError?.(error),
+    onFinish: (info) => hooks.onFinish?.(info),
+    transport: new DefaultChatTransport({
+      fetch: async () => Response.json({ error: { message: failure } }, { status: 400 }),
+    }),
+  });
+  draw().find((node) => node.type === "textarea")!.props.onChange!({ target: { value: "Keep this draft" } });
+  draw().find((node) => node.props.onDrop)!.props.onDrop!({ preventDefault() {}, dataTransfer: { files: [new File(["draft"], "draft.png", { type: "image/png" })] } });
+  await draw().find((node) => node.props.message?.id === "old-answer")!.props.onRegenerate!();
+  expect(hooks.chat.error?.message).toContain(failure);
+  expect(hooks.chat.messages).toEqual(history);
+  expect(draw().find((node) => node.type === "textarea")!.props.value).toBe("Keep this draft");
+  expect(draw().some((node) => node.props.children === "draft.png")).toBe(true);
+});
+
+it.each(["completed", "unknown"])("preserves newly streamed %s write evidence after regeneration fails", async (outcome) => {
+  const output = { uid: 123, _meta: { operation: "write", outcome } };
+  const chunks: UIMessageChunk[] = [
+    { type: "start", messageId: "new-answer" },
+    { type: "tool-input-available", toolCallId: "write", toolName: "WriteTable", input: {} },
+    { type: "tool-output-available", toolCallId: "write", output },
+    { type: "error", errorText: "Provider disconnected" },
+  ];
+  hooks.chat = new Chat<UIMessage>({
+    messages: [
+      { id: "user", role: "user", parts: [{ type: "text", text: "Question" }] },
+      { id: "old-answer", role: "assistant", parts: [{ type: "text", text: "Old answer" }] },
+    ],
+    onError: (error) => hooks.onError?.(error),
+    onFinish: (info) => hooks.onFinish?.(info),
+    transport: new DefaultChatTransport({ fetch: async () => createUIMessageStreamResponse({
+      stream: new ReadableStream({ start(controller) { chunks.forEach((chunk) => controller.enqueue(chunk)); controller.close(); } }),
+    }) }),
+  });
+  await draw().find((node) => node.props.message?.id === "old-answer")!.props.onRegenerate!();
+  expect(hooks.chat.error?.message).toBe("Provider disconnected");
+  expect(hooks.chat.messages.at(-1)).toMatchObject({ id: "new-answer", parts: [expect.objectContaining({ state: "output-available", output })] });
 });
