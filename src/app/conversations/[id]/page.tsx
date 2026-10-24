@@ -53,16 +53,16 @@ export default async function ConversationPage({
       <ConversationSidebar activeConversationId={id} />
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between border-b border-border/70 bg-background/75 px-5 py-4 backdrop-blur">
-          <div className="min-w-0">
-            <h1 className="truncate text-xl font-semibold tracking-tight">
+        <header className="flex flex-col gap-3 border-b border-border/70 bg-background/75 px-5 py-4 backdrop-blur 2xl:flex-row 2xl:items-center 2xl:justify-between">
+          <div className="min-w-0 flex-1 pt-10 lg:pt-0">
+            <h1 className="break-words text-xl font-semibold tracking-tight">
               {conversation.title}
             </h1>
             <p className="text-sm text-muted-foreground">
               Conversation workspace · {formatTokenUsage(conversationUsage)}
             </p>
           </div>
-          <div className="flex items-center gap-2 md:gap-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 md:gap-3 2xl:justify-end">
             <div className="hidden h-9 items-center gap-2 rounded-full border border-border/70 bg-card/80 px-2.5 text-sm md:flex">
               <Avatar className="h-6 w-6">
                 <AvatarFallback className="text-xs">{initials}</AvatarFallback>
