@@ -26,7 +26,6 @@ export interface ChatProviderResolution {
   modelId: string;
   provider: ReturnType<typeof createOpenAI>;
   providerKind: ModelProvider;
-  supportsBuiltInMcpTool: boolean;
 }
 
 export function parseCustomModelId(
@@ -54,10 +53,6 @@ export function resolveCustomProviderSelection(
 
   const provider = providers.find((entry) => entry.id === parsed.providerId);
   return provider ? { provider, remoteModelId: parsed.remoteModelId } : null;
-}
-
-export function supportsBuiltInMcpTool(modelId: string): boolean {
-  return modelId.trim().toLowerCase() === "gpt-5.4-nano";
 }
 
 export function resolveChatProvider({
@@ -125,6 +120,5 @@ export function resolveChatProvider({
       : useLmStudio
         ? "lmstudio"
         : "openai",
-    supportsBuiltInMcpTool: supportsBuiltInMcpTool(modelId),
   };
 }

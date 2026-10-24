@@ -158,16 +158,25 @@ export async function persistChatTurn({
 
   if (/^new conversation$/i.test(conversation.title) && userText.trim()) {
     const fallbackTitle = getConversationTitle(userText);
-    await db
+    const updated = await db
       .update(conversations)
       .set({
         title: fallbackTitle,
         updated_at: Math.floor(Date.now() / 1000),
       })
-      .where(eq(conversations.id, conversation.id));
+      .where(and(
+        eq(conversations.id, conversation.id),
+        eq(conversations.title, conversation.title),
+      ))
+      .returning({ id: conversations.id });
 
+    if (updated.length === 0) {
+      await db.update(conversations)
+        .set({ updated_at: Math.floor(Date.now() / 1000) })
+        .where(eq(conversations.id, conversation.id));
+    }
     return {
-      titleGeneration: titleGenerator
+      titleGeneration: updated.length > 0 && titleGenerator
         ? updateGeneratedConversationTitle({
             assistantText,
             conversationId: conversation.id,

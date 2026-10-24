@@ -1,3 +1,4 @@
+import { hasUnknownWriteOutcome } from "@/lib/mcp-outcome";
 import { isToolUIPart, type UIMessage } from "ai";
 
 export type ToolState =
@@ -85,7 +86,7 @@ export function getToolIntent(part: GenericToolPart): ToolIntent {
 }
 
 export function getOperationType(part: GenericToolPart): ToolOperation {
-  if (part.state === "output-error") {
+  if (part.state === "output-error" || hasUnknownWriteOutcome(part.output)) {
     return "error";
   }
 

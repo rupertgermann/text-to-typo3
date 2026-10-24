@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { Check, ChevronDown, ChevronRight, ExternalLink, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { hasUnknownWriteOutcome, UNKNOWN_WRITE_MESSAGE } from "@/lib/mcp-outcome";
 import { cn } from "@/lib/utils";
 import {
   buildWorkspaceModuleUrl,
@@ -38,6 +39,7 @@ function parseObjectInput(input: unknown): Record<string, unknown> | null {
 }
 
 function getApprovalLabel(part: GenericToolPart): string {
+  if (hasUnknownWriteOutcome(part.output)) return "outcome unknown";
   if (part.state === "approval-requested") {
     return "pending approval";
   }
@@ -176,6 +178,12 @@ export function ToolCallCard({
           </span>
         ) : null}
       </button>
+
+      {hasUnknownWriteOutcome(part.output) ? (
+        <p role="alert" className="border-t border-current/10 px-3 py-2 text-sm">
+          {UNKNOWN_WRITE_MESSAGE}
+        </p>
+      ) : null}
 
       {isQueuedWorkspaceWrite && workspaceModuleUrl ? (
         <div className="flex flex-wrap items-center gap-2 border-t border-current/10 bg-background/45 px-3 py-2 text-xs">

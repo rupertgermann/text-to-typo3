@@ -229,6 +229,7 @@ pnpm db:studio
 - User messages support copy, timestamp hover state, edit-and-rerun, and image attachments.
 - Stopping generation preserves the partial response.
 - Completed TYPO3 writes remain in history if a later model step fails. Retry, Edit, and Regenerate cannot replace turns containing completed writes; send a new message to continue.
+- If a write response is lost, chat saves an unknown outcome and stops further writes in that response. Check the TYPO3 workspace before sending a new write request. Retry, Edit, and Regenerate preserve the uncertain result.
 - Conversation history restores after reload.
 - TYPO3 MCP sessions can span several tool steps inside one response, up to `TYPO3_AGENT_MAX_STEPS` model/tool round-trips per request.
 - Chat requests resolve the turn, provider, and persistence plan through dedicated modules before streaming.
@@ -258,7 +259,7 @@ pnpm db:studio
 - Model provider connection tests stop after 10 seconds, including response-body reading, or when the request is canceled.
 - Context-window information is shown in model cards and persisted for chat budgeting.
 - The default selected model falls back to `gpt-5.4-mini` when no user preference is stored.
-- `gpt-5.4-nano` uses the provider's built-in MCP server tool integration; other OpenAI-compatible models use the app's TYPO3 MCP bridge.
+- New requests use the app's TYPO3 MCP bridge for every model, so uncertain writes can stop further automatic mutations. Saved approvals from the provider's built-in MCP integration can still be approved or denied; each additional hosted call requires approval.
 - LM Studio and custom OpenAI-compatible models use the chat-completions path and the same server-side TYPO3 MCP bridge as the app-managed OpenAI path.
 - For TYPO3 mutation requests on OpenAI-compatible chat-completions models, the chat loop keeps tool calling active until a write succeeds or the configured step cap is reached.
 
@@ -301,6 +302,8 @@ pnpm db:studio
 The app stores its local database in `data/app.db`.
 
 Run one Node.js process per SQLite database. Conversation generation and OAuth refresh coordination run in that process. Multiple workers require shared coordination before they can safely use the same database.
+
+OAuth requests have a 10-second deadline covering response headers and body reads. Logout clears the local session even if remote revocation fails. It revokes saved credentials without starting a refresh and includes rotated credentials from a refresh already in progress.
 
 The current schema includes:
 

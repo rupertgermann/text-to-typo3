@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { and, asc, eq } from "drizzle-orm";
 import { isToolUIPart, type UIMessage } from "ai";
 import { db } from "@/lib/db";
+import { hasUnknownWriteOutcome, UNKNOWN_WRITE_MESSAGE } from "@/lib/mcp-outcome";
 import { listMcpToolNamesByOperation } from "@/lib/mcp";
 import { conversations, messages, type Conversation } from "@/lib/db/schema";
 import {
@@ -26,6 +27,7 @@ export class ChatTurnResolutionError extends Error {
 
 export interface ChatTurnResolution {
   continuationAssistantMessageId: string | null;
+  nativeApprovalNames: string[];
   claimApproval: (() => void) | null;
   conversation: Conversation;
   userText: string;
@@ -81,6 +83,7 @@ export async function resolveChatTurn({
 
     return {
       continuationAssistantMessageId: null,
+      nativeApprovalNames: [],
       claimApproval: null,
       conversation,
       ...resolved,
@@ -88,7 +91,7 @@ export async function resolveChatTurn({
   }
 
   if (lastMessage && hasApprovalResponseParts(lastMessage)) {
-    const { continuationAssistantMessageId, claimApproval, userText } =
+    const { continuationAssistantMessageId, nativeApprovalNames, claimApproval, userText } =
       await resolveApprovalContinuationTurn({
         conversationId,
         lastMessage,
@@ -97,6 +100,7 @@ export async function resolveChatTurn({
 
     return {
       continuationAssistantMessageId,
+      nativeApprovalNames,
       claimApproval,
       conversation,
       userText,
@@ -113,6 +117,7 @@ export async function resolveChatTurn({
 
   return {
     continuationAssistantMessageId: null,
+    nativeApprovalNames: [],
     claimApproval: null,
     conversation,
     ...resolved,
@@ -183,6 +188,7 @@ async function resolveApprovalContinuationTurn({
   messageId?: string;
 }): Promise<{
   continuationAssistantMessageId: string;
+  nativeApprovalNames: string[];
   claimApproval: () => void;
   userText: string;
 }> {
@@ -275,6 +281,10 @@ async function resolveApprovalContinuationTurn({
 
   return {
     continuationAssistantMessageId: targetMessageId,
+    nativeApprovalNames: storedParts.flatMap((part) =>
+      part.type === "dynamic-tool" && part.state === "approval-requested" && part.toolName.startsWith("mcp.")
+        ? [part.toolName.slice(4)] : [],
+    ),
     claimApproval: () => {
       const claimed = db
         .update(messages)
@@ -388,14 +398,21 @@ async function assertReplaceableHistory(
   let readToolNames: string[] | undefined;
   for (const message of history) {
     for (const part of deserializeMessageParts(message.tool_calls) ?? []) {
-      if (!isToolUIPart(part) || part.state !== "output-available") continue;
-      const output = part.output;
-      if (
+      if (!isToolUIPart(part) || (part.state !== "output-available" && part.state !== "output-error" && part.state !== "approval-responded")) continue;
+      if (part.state === "approval-responded" && !part.approval.approved) continue;
+      const output = part.state === "output-available" ? part.output : undefined;
+      if (hasUnknownWriteOutcome(output)) {
+        throw new ChatTurnResolutionError(UNKNOWN_WRITE_MESSAGE, 409);
+      }
+      const toolName = part.type === "dynamic-tool" ? part.toolName : part.type.slice(5);
+      if (toolName === "web_search") continue;
+      const nativeError = toolName.startsWith("mcp.") && typeof output === "object" && output !== null && "error" in output && Boolean(output.error);
+      if (!nativeError && (
         typeof output === "object" &&
         output !== null &&
         (("isError" in output && output.isError === true) ||
           ("error" in output && Boolean(output.error)))
-      ) {
+      )) {
         continue;
       }
       const meta =
@@ -406,8 +423,6 @@ async function assertReplaceableHistory(
         typeof meta === "object" && meta !== null && "operation" in meta
           ? meta.operation
           : undefined;
-      const toolName = part.type === "dynamic-tool"
-        ? part.toolName : part.type.slice(5);
       let isWrite = operation === "write" ||
         (operation !== "read" && toolName === "WriteTable");
       if (part.type === "dynamic-tool" && toolName.startsWith("mcp.")) {
@@ -421,9 +436,18 @@ async function assertReplaceableHistory(
         }
         isWrite = !readToolNames.includes(toolName.slice(4));
       }
+      if ((part.state === "output-error" || part.state === "approval-responded") && !isWrite) {
+        try {
+          readToolNames ??= (await listMcpToolNamesByOperation({ accessToken })).read;
+          isWrite = !readToolNames.includes(toolName.replace(/^mcp\./, ""));
+        } catch {
+          isWrite = true;
+        }
+      }
       if (isWrite) {
         throw new ChatTurnResolutionError(
-          "Completed TYPO3 changes cannot be retried or replaced. Continue with a new message so the saved tool results are retained.",
+          part.state === "output-error" || part.state === "approval-responded" || nativeError ? UNKNOWN_WRITE_MESSAGE :
+            "Completed TYPO3 changes cannot be retried or replaced. Continue with a new message so the saved tool results are retained.",
           409,
         );
       }

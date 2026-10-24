@@ -5,6 +5,8 @@ import { db, setupTestDatabase, type TestDatabase } from "@/test/database";
 import { conversations, messages, users } from "@/lib/db/schema";
 import { deserializeMessageParts } from "@/lib/chat-message-parts";
 import { resolveChatTurn } from "./chat-turn-resolution";
+import { startFakeMcpServer } from "@/test/fake-mcp-server";
+import { resetMcpCachesForTests } from "@/lib/mcp";
 
 const USER_ID = "turn-user";
 
@@ -55,6 +57,24 @@ describe("chat turn resolution", () => {
     expect(rows[0]?.id).toBe("incoming-user");
     expect(rows[0]?.role).toBe("user");
     expect(rows[0]?.content).toBe("Create a page");
+  });
+
+  it.each(["WriteTable", "GetPageTree", "web_search"])("protects legacy failed writes and permits read recovery for %s", async (toolName) => {
+    const mcp = await startFakeMcpServer();
+    vi.stubEnv("TYPO3_MCP_URL", mcp.url);
+    try {
+      await db.insert(messages).values([
+        { id: "legacy-user", conversation_id: "conversation-turns", role: "user", content: "Question", created_at: 1 },
+        { id: "legacy-assistant", conversation_id: "conversation-turns", role: "assistant", content: "", created_at: 2, tool_calls: JSON.stringify([{ type: `tool-${toolName}`, toolCallId: "legacy-error", state: "output-error", input: {}, errorText: "Connection lost" }]) },
+      ]);
+      const turn = resolveChatTurn({ conversationId: "conversation-turns", messageId: "legacy-assistant", trigger: "regenerate-message", uiMessages: [], userId: USER_ID });
+      if (toolName === "WriteTable") await expect(turn).rejects.toMatchObject({ status: 409 });
+      else await expect(turn).resolves.toMatchObject({ historyChange: { removeMessageIds: ["legacy-assistant"] } });
+      expect(await orderedMessages()).toHaveLength(2);
+    } finally {
+      await mcp.close();
+      resetMcpCachesForTests();
+    }
   });
 
   it("resolves regeneration without deleting the original response", async () => {
