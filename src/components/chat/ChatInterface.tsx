@@ -5,6 +5,7 @@ import { useChat } from "@ai-sdk/react";
 import {
   DefaultChatTransport,
   lastAssistantMessageIsCompleteWithApprovalResponses,
+  isFileUIPart,
   type FileUIPart,
   type UIMessage,
 } from "ai";
@@ -55,9 +56,7 @@ interface ChatInterfaceProps {
   typo3BaseUrl: string;
 }
 
-type PendingAttachment = {
-  file: File;
-};
+type PendingAttachment = { file: File } | { part: FileUIPart };
 
 const starterPromptIcons: Record<StarterPromptCategory, LucideIcon> = {
   inspection: Search,
@@ -127,6 +126,12 @@ export function ChatInterface({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const transcriptViewportRef = useRef<HTMLDivElement>(null);
   const shouldStickToBottomRef = useRef(true);
+  const submittedDraftRef = useRef<{
+    messages: UIMessage[];
+    input: string;
+    attachments: PendingAttachment[];
+    editingMessageId: string | null;
+  } | null>(null);
   const initialUiMessages = useMemo(
     () => toUIMessages(initialMessages),
     [initialMessages],
@@ -139,6 +144,7 @@ export function ChatInterface({
     addToolApprovalResponse,
     sendMessage,
     regenerate,
+    setMessages,
     stop,
   } = useChat({
     messages: initialUiMessages,
@@ -146,6 +152,23 @@ export function ChatInterface({
       body: { conversationId },
     }),
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
+    onError: (error) => {
+      const draft = submittedDraftRef.current;
+      if (draft && isTurnConflict(error)) {
+        setMessages(draft.messages);
+        setInput(draft.input);
+        setAttachments(draft.attachments);
+        setEditingMessageId(
+          error.message.includes('"completed_tool_results"')
+            ? null
+            : draft.editingMessageId,
+        );
+      }
+      submittedDraftRef.current = null;
+    },
+    onFinish: () => {
+      submittedDraftRef.current = null;
+    },
   });
 
   const isLoading = status === "submitted" || status === "streaming";
@@ -209,37 +232,32 @@ export function ChatInterface({
 
     try {
       const files: FileUIPart[] = await Promise.all(
-        currentAttachments.map(async (attachment) => ({
-          type: "file" as const,
-          mediaType: attachment.file.type || "application/octet-stream",
-          filename: attachment.file.name,
-          url: await fileToDataUrl(attachment.file),
-        })),
+        currentAttachments.map(async (attachment) =>
+          "part" in attachment ? attachment.part : {
+            type: "file" as const,
+            mediaType: attachment.file.type || "application/octet-stream",
+            filename: attachment.file.name,
+            url: await fileToDataUrl(attachment.file),
+          },
+        ),
       );
 
       setInput("");
       setAttachments([]);
       setEditingMessageId(null);
       setComposerError(null);
+      submittedDraftRef.current = {
+        messages,
+        input: currentText,
+        attachments: currentAttachments,
+        editingMessageId: currentEditingMessageId,
+      };
 
       if (currentEditingMessageId) {
-        if (currentText.trim() && files.length > 0) {
-          await sendMessage({
-            text: currentText.trim(),
-            files,
-            messageId: currentEditingMessageId,
-          });
-        } else if (currentText.trim()) {
-          await sendMessage({
-            text: currentText.trim(),
-            messageId: currentEditingMessageId,
-          });
-        } else {
-          await sendMessage({
-            files,
-            messageId: currentEditingMessageId,
-          });
-        }
+        await sendMessage({
+          parts: [...(text ? [{ type: "text" as const, text }] : []), ...files],
+          messageId: currentEditingMessageId,
+        });
         return;
       }
 
@@ -262,7 +280,9 @@ export function ChatInterface({
   const startEditing = (message: UIMessage) => {
     setEditingMessageId(message.id);
     setInput(extractMessageText(message.parts));
-    setAttachments([]);
+    setAttachments(
+      message.parts.filter(isFileUIPart).map((part) => ({ part })),
+    );
     setComposerError(null);
     queueMicrotask(() => textareaRef.current?.focus());
   };
@@ -274,10 +294,20 @@ export function ChatInterface({
     }
 
     clearError();
+    submittedDraftRef.current = {
+      messages, input, attachments, editingMessageId,
+    };
     await sendMessage({
       parts: lastUserMessage.parts,
       messageId: lastUserMessage.id,
     });
+  };
+
+  const regenerateMessage = async (messageId: string) => {
+    submittedDraftRef.current = {
+      messages, input, attachments, editingMessageId,
+    };
+    await regenerate({ messageId });
   };
 
   const toggleAutoApproveWrites = async () => {
@@ -487,7 +517,7 @@ export function ChatInterface({
                   }
                   onRegenerate={
                     message.role === "assistant"
-                      ? () => regenerate({ messageId: message.id })
+                      ? () => regenerateMessage(message.id)
                       : undefined
                   }
                   onToolApprovalResponse={handleToolApprovalResponse}
@@ -504,16 +534,18 @@ export function ChatInterface({
                     <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
                     <div className="space-y-2">
                       <p>{getChatErrorDisplayMessage(error)}</p>
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => void retryLastUserMessage()}
-                        disabled={isLoading}
-                      >
-                        <RefreshCw className="h-3.5 w-3.5" />
-                        Retry
-                      </Button>
+                      {!isTurnConflict(error) ? (
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => void retryLastUserMessage()}
+                          disabled={isLoading}
+                        >
+                          <RefreshCw className="h-3.5 w-3.5" />
+                          Retry
+                        </Button>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -612,11 +644,15 @@ export function ChatInterface({
                 <div className="mb-3 flex flex-wrap gap-2">
                   {attachments.map((attachment, index) => (
                     <div
-                      key={`${attachment.file.name}-${attachment.file.lastModified}-${index}`}
+                      key={index}
                       className="flex items-center gap-2 rounded-xl border bg-muted/40 px-3 py-2 text-xs"
                     >
                       <ImagePlus className="h-4 w-4" />
-                      <span className="max-w-48 truncate">{attachment.file.name}</span>
+                      <span className="max-w-48 truncate">
+                        {"part" in attachment
+                          ? attachment.part.filename ?? "Image attachment"
+                          : attachment.file.name}
+                      </span>
                       <Button
                         type="button"
                         variant="ghost"
@@ -727,9 +763,19 @@ export function ChatInterface({
 }
 
 function getChatErrorDisplayMessage(error: Error): string {
-  if (/MCP|TYPO3/i.test(error.message)) {
+  if (isTurnConflict(error)) {
+    return error.message.includes('"completed_tool_results"')
+      ? "Completed TYPO3 changes are saved. Continue with a new message."
+      : "This conversation is generating a response. Your draft is retained; send it after generation finishes.";
+  }
+  if (/MCP|TYPO3|conversation is generating/i.test(error.message)) {
     return error.message;
   }
 
   return "Model provider error. Try again or test the provider connection in Settings.";
+}
+
+function isTurnConflict(error: Error): boolean {
+  return error.message.includes('"completed_tool_results"') ||
+    error.message.includes('"conversation_busy"');
 }

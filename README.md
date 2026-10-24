@@ -228,6 +228,7 @@ pnpm db:studio
 - Assistant responses render Markdown with GFM tables and code blocks.
 - User messages support copy, timestamp hover state, edit-and-rerun, and image attachments.
 - Stopping generation preserves the partial response.
+- Completed TYPO3 writes remain in history if a later model step fails. Retry, Edit, and Regenerate cannot replace turns containing completed writes; send a new message to continue.
 - Conversation history restores after reload.
 - TYPO3 MCP sessions can span several tool steps inside one response, up to `TYPO3_AGENT_MAX_STEPS` model/tool round-trips per request.
 - Chat requests resolve the turn, provider, and persistence plan through dedicated modules before streaming.
@@ -253,6 +254,8 @@ pnpm db:studio
 - Per-user settings, configured providers, selected model IDs, and context-window hints are persisted in SQLite.
 - Model providers are queried in parallel with per-provider status. Slow or unreachable providers appear as unavailable while other provider results stay usable.
 - Settings render saved values immediately while provider catalogs load in the background.
+- Settings can be saved after their draft has loaded. Background refreshes preserve edits in the open form, and closing the form clears unsaved API keys.
+- Model provider connection tests stop after 10 seconds, including response-body reading, or when the request is canceled.
 - Context-window information is shown in model cards and persisted for chat budgeting.
 - The default selected model falls back to `gpt-5.4-mini` when no user preference is stored.
 - `gpt-5.4-nano` uses the provider's built-in MCP server tool integration; other OpenAI-compatible models use the app's TYPO3 MCP bridge.
@@ -296,6 +299,8 @@ pnpm db:studio
 ## Data Storage
 
 The app stores its local database in `data/app.db`.
+
+Run one Node.js process per SQLite database. Conversation generation and OAuth refresh coordination run in that process. Multiple workers require shared coordination before they can safely use the same database.
 
 The current schema includes:
 
