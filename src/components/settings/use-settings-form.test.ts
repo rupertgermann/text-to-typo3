@@ -28,6 +28,11 @@ vi.mock("react", async (importOriginal) => ({
   },
   useMemo: <T>(factory: () => T) => factory(),
   useCallback: <T>(callback: T) => callback,
+  useRef<T>(initial: T) {
+    const index = hooks.cursor++;
+    if (!(index in hooks.states)) hooks.states[index] = { current: initial };
+    return hooks.states[index];
+  },
   useEffect(effect: EffectCallback, deps?: DependencyList) {
     const index = hooks.cursor++;
     const previous = hooks.effects[index];
@@ -168,9 +173,52 @@ it("keeps the cached reopen draft through a delayed GET and initializes the next
   expect(form.openaiKey).toBe("");
 });
 
-function findSaveButton(node: ReactNode): { disabled?: boolean } | undefined {
+it("publishes canonical saved settings before notification and immediate reopen despite an older GET", async () => {
+  draw(); request.resolve(Response.json(saved)); await settle();
+  opened = false; draw();
+  const stale = deferred<Response>();
+  const refresh = deferred<Response>();
+  const reads = [stale.promise, refresh.promise];
+  const canonical: PublicUserSettings = {
+    ...saved, lmstudioBaseUrl: "http://new.local/v1",
+    customProviders: [...saved.customProviders, {
+      id: "new", displayName: "New", baseUrl: "http://new-provider.local/v1", hasApiKey: true,
+    }],
+  };
+  fetchMock.mockImplementation(async (url, options) => {
+    if (options?.method === "PATCH") return Response.json(canonical);
+    if (url === "/api/settings") return reads.shift() ?? Response.json(canonical);
+    return new Response("");
+  });
+  const published: Array<PublicUserSettings | undefined> = [];
+  window.addEventListener("text-to-typo3-settings-updated", () => published.push(draw().settings));
+  onSaved.mockImplementation(() => published.push(draw().settings));
+  opened = true;
+  let form = draw();
+  form.setLmstudioBaseUrl("http://new.local/v1");
+  form = draw();
+  await form.handleSave();
+  expect(published).toEqual([canonical, canonical]);
+
+  opened = false; draw();
+  opened = true; form = draw();
+  expect(form.lmstudioBaseUrl).toBe(canonical.lmstudioBaseUrl);
+  expect(form.customProviders).toEqual(canonical.customProviders.map((provider) => ({ ...provider, apiKey: "" })));
+  stale.resolve(Response.json(saved));
+  form = await settle();
+  expect(form.settings).toEqual(canonical);
+  await form.handleSave();
+  expect(JSON.parse(String(patches()[1][1]?.body))).toMatchObject({
+    lmstudioBaseUrl: canonical.lmstudioBaseUrl,
+    customProviders: canonical.customProviders.map(({ id, displayName, baseUrl }) => ({ id, displayName, baseUrl })),
+  });
+  refresh.resolve(Response.json(canonical));
+  await settle();
+});
+
+function findSaveButton(node: ReactNode): { disabled?: boolean; onClick?: () => void } | undefined {
   for (const child of Children.toArray(node)) {
-    if (!isValidElement<{ children?: ReactNode; disabled?: boolean }>(child)) continue;
+    if (!isValidElement<{ children?: ReactNode; disabled?: boolean; onClick?: () => void }>(child)) continue;
     if (Children.toArray(child.props.children).includes("Save settings")) return child.props;
     const found = findSaveButton(child.props.children);
     if (found) return found;
@@ -186,4 +234,72 @@ it("disables the modal Save button until its settings draft is initialized", asy
   for (let i = 0; i < 20; i++) await Promise.resolve();
   tree = modal();
   expect(findSaveButton(tree)?.disabled).toBe(false);
+});
+
+function findFormControls(node: ReactNode): { disabled?: boolean; children?: ReactNode } | undefined {
+  for (const child of Children.toArray(node)) {
+    if (!isValidElement<{ children?: ReactNode; disabled?: boolean }>(child)) continue;
+    if (child.type === "fieldset") return child.props;
+    const found = findFormControls(child.props.children);
+    if (found) return found;
+  }
+}
+
+function findKeyInput(node: ReactNode): { value?: string; onChange?: (event: { target: { value: string } }) => void } | undefined {
+  for (const child of Children.toArray(node)) {
+    if (!isValidElement<{
+      children?: ReactNode; placeholder?: string; value?: string;
+      onChange?: (event: { target: { value: string } }) => void;
+    }>(child)) continue;
+    if (child.props.placeholder === "Key configured") return child.props;
+    const found = findKeyInput(child.props.children);
+    if (found) return found;
+  }
+}
+
+it("freezes editing and Close/Escape dismissal during a save and restores the draft on failure", async () => {
+  const modal = () => render(() => SettingsModal({ displayName: "User", typo3BaseUrl: "https://typo3.test" }));
+  let tree = modal();
+  tree.props.onOpenChange(true);
+  tree = modal();
+  expect(findFormControls(tree)?.disabled).toBe(true);
+  request.resolve(Response.json(saved));
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  tree = modal();
+  expect(findFormControls(tree)?.disabled).toBe(false);
+  findKeyInput(tree)?.onChange?.({ target: { value: "unsaved-key" } });
+  tree = modal();
+
+  const patch = deferred<Response>();
+  fetchMock.mockImplementation(async (url, options) => {
+    if (options?.method === "PATCH") return patch.promise;
+    if (url === "/api/settings") return Response.json(saved);
+    return new Response("");
+  });
+  const save = findSaveButton(tree)?.onClick;
+  save?.();
+  save?.();
+  tree = modal();
+  expect(patches()).toHaveLength(1);
+  expect(JSON.parse(String(patches()[0][1]?.body)).openaiApiKey).toBe("unsaved-key");
+  expect(findFormControls(tree)?.disabled).toBe(true);
+  expect(findKeyInput(findFormControls(tree)?.children)?.value).toBe("unsaved-key");
+  const content = Children.toArray(tree.props.children).find((child) =>
+    isValidElement<{ showCloseButton?: boolean }>(child) && child.props.showCloseButton === false,
+  );
+  expect(content).toBeDefined();
+  tree.props.onOpenChange(false, { reason: "close-press" });
+  expect(modal().props.open).toBe(true);
+  tree.props.onOpenChange(false, { reason: "escape-key" });
+  expect(modal().props.open).toBe(true);
+
+  patch.resolve(Response.json({ error: "Save failed" }, { status: 500 }));
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  tree = modal();
+  expect(tree.props.open).toBe(true);
+  expect(findFormControls(tree)?.disabled).toBe(false);
+  expect(findSaveButton(tree)?.disabled).toBe(false);
+  expect(findKeyInput(tree)?.value).toBe("unsaved-key");
+  tree.props.onOpenChange(false);
+  expect(modal().props.open).toBe(false);
 });

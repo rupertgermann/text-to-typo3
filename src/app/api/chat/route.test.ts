@@ -4,6 +4,8 @@ import { asc, eq } from "drizzle-orm";
 import { DefaultChatTransport, isToolUIPart, type UIMessage } from "ai";
 import { Chat } from "@ai-sdk/react";
 import { POST } from "./route";
+import { DELETE as deleteConversation } from "../conversations/[id]/route";
+import * as authentication from "@/lib/auth";
 import { GET as exportConversation } from "../conversations/[id]/export/route";
 import { db, setupTestDatabase, type TestDatabase } from "@/test/database";
 import { conversations, messages, userSettings, users } from "@/lib/db/schema";
@@ -47,6 +49,90 @@ describe("chat route integration", () => {
     vi.unstubAllEnvs();
     testDatabase?.cleanup();
     testDatabase = null;
+  });
+
+  it.each([false, true])("rejects deletion during generation and preserves the write result when response is lost=%s", async (lostResponse) => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [
+      createToolCallResponse({ toolCallId: "protected-write", toolName: "WriteTable", argumentsJson: JSON.stringify({ action: "create", table: "pages", data: { title: "Tracked write" } }) }),
+      createTextResponse({ text: "Created with a saved result" }),
+    ] });
+    await seedTokenModeConversation({ conversationId: "delete-active", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Delete active", autoApproveWrites: true });
+    await db.insert(conversations).values({ id: "idle", user_id: LOCAL_USER_ID, title: "Idle" });
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith(fakeModel!.url) && String(input).endsWith("/chat/completions")) {
+        entered.resolve();
+        await resume.promise;
+      }
+      const response = await realFetch(input, init);
+      if (lostResponse && String(input).startsWith(fakeMcp!.url) && String(init?.body).includes('"tools/call"')) {
+        await response.text();
+        throw new TypeError("Response lost after commit");
+      }
+      return response;
+    });
+    const response = await postChat({ conversationId: "delete-active", text: "Create a page" });
+    const finished = lostResponse ? response.body?.cancel() : response.text();
+    await entered.promise;
+    try {
+      const rejected = await deleteChat("delete-active");
+      expect(rejected.status).toBe(409);
+      expect(await rejected.json()).toEqual({ error: { code: "conversation_busy", message: expect.any(String) } });
+      expect(fakeMcp.toolCalls).toHaveLength(0);
+      expect((await deleteChat("idle")).status).toBe(204);
+      const auth = await authentication.getAuthenticatedUser();
+      if (!auth) throw new Error("Expected authenticated test user");
+      vi.spyOn(authentication, "getAuthenticatedUser").mockResolvedValueOnce({ ...auth, user: { ...auth.user, id: "another-user" } });
+      expect((await deleteChat("delete-active")).status).toBe(404);
+    } finally {
+      resume.resolve();
+      await finished;
+    }
+    await vi.waitFor(async () => expect(await latestAssistantMessage("delete-active")).not.toBeNull());
+    expect(fakeMcp.toolCalls).toHaveLength(1);
+    const saved = await latestAssistantMessage("delete-active");
+    expect(saved?.tool_calls).toContain('"state":"output-available"');
+    if (lostResponse) expect(saved?.tool_calls).toContain('"outcome":"unknown"');
+    else expect(saved?.content).toBe("Created with a saved result");
+    expect((await deleteChat("delete-active")).status).toBe(204);
+    expect(await persistedUiMessages("delete-active")).toEqual([]);
+  });
+
+  it("blocks a new turn while deletion owns the conversation lookup", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [] });
+    await seedTokenModeConversation({ conversationId: "delete-first", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Delete first", autoApproveWrites: true });
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    const findFirst = db.query.conversations.findFirst.bind(db.query.conversations);
+    vi.spyOn(db.query.conversations, "findFirst").mockImplementationOnce((...args) => {
+      const query = findFirst(...args);
+      const execute = query.execute.bind(query);
+      vi.spyOn(query, "execute").mockImplementationOnce(async () => {
+        const conversation = await execute();
+        entered.resolve();
+        await resume.promise;
+        return conversation;
+      });
+      return query;
+    });
+    const deletion = deleteChat("delete-first");
+    await entered.promise;
+    try {
+      expect((await postChat({ conversationId: "delete-first", text: "Create a page" })).status).toBe(409);
+      expect((await deleteChat("delete-first")).status).toBe(409);
+    } finally {
+      resume.resolve();
+      await deletion;
+    }
+    expect((await deletion).status).toBe(204);
+    expect((await postChat({ conversationId: "delete-first", text: "Too late" })).status).toBe(404);
+    expect(fakeModel.chatRequests).toEqual([]);
+    expect(fakeMcp.toolCalls).toEqual([]);
+    expect(await persistedUiMessages("delete-first")).toEqual([]);
   });
 
   it("uses the app bridge for a fresh nano turn and stops after a lost write response", async () => {
@@ -336,6 +422,7 @@ describe("chat route integration", () => {
     await entered.promise;
     const overlap = await postChat({ conversationId: "persist-lock", text: "Rejected" });
     expect(overlap.status).toBe(409);
+    expect((await deleteChat("persist-lock")).status).toBe(409);
     resume.resolve();
     await finished;
     const later = await postChat({ conversationId: "persist-lock", text: "Later" });
@@ -1449,4 +1536,11 @@ async function expectConversationTitle(
     where: eq(conversations.id, conversationId),
   });
   expect(conversation?.title).toBe(expectedTitle);
+}
+
+async function deleteChat(conversationId: string) {
+  return deleteConversation(
+    new Request(`http://localhost/api/conversations/${conversationId}`, { method: "DELETE" }) as never,
+    { params: Promise.resolve({ id: conversationId }) },
+  );
 }

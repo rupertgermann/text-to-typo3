@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   SETTINGS_UPDATED_EVENT,
   useClientQuery,
@@ -141,6 +141,7 @@ export function useSettingsForm({
 }) {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const savePending = useRef(false);
   const [draftInitialized, setDraftInitialized] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [catalogState, setCatalogState] = useState<{
@@ -166,6 +167,7 @@ export function useSettingsForm({
     data: settings,
     error: settingsError,
     isLoading: settingsLoading,
+    mutate: mutateSettings,
   } = useClientQuery<PublicUserSettings>({
     key: ["settings"],
     fetcher: fetchSettings,
@@ -328,10 +330,11 @@ export function useSettingsForm({
   }
 
   async function handleSave() {
-    if (!open || !draftInitialized) {
+    if (!open || !draftInitialized || savePending.current) {
       return;
     }
 
+    savePending.current = true;
     setSaving(true);
     setError(null);
 
@@ -373,6 +376,7 @@ export function useSettingsForm({
       }
 
       const nextSettings: PublicUserSettings = await response.json();
+      mutateSettings(() => nextSettings);
       setCustomProviders(
         nextSettings.customProviders.map((provider) => ({
           ...provider,
@@ -387,6 +391,7 @@ export function useSettingsForm({
         saveError instanceof Error ? saveError.message : "Failed to save settings",
       );
     } finally {
+      savePending.current = false;
       setSaving(false);
     }
   }

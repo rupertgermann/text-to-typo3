@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { tryAcquireConversation } from "@/lib/conversation-admission";
 import {
   conversations,
   messages,
@@ -167,12 +168,17 @@ export async function updateConversationForUser(
 export async function deleteConversationForUser(
   userId: string,
   conversationId: string,
-): Promise<boolean> {
-  const conversation = await getConversationForUser(userId, conversationId);
-  if (!conversation) {
-    return false;
-  }
+): Promise<"deleted" | "not_found" | "busy"> {
+  const release = tryAcquireConversation(userId, conversationId);
+  if (!release) return "busy";
 
-  await db.delete(conversations).where(eq(conversations.id, conversationId));
-  return true;
+  try {
+    const conversation = await getConversationForUser(userId, conversationId);
+    if (!conversation) return "not_found";
+
+    await db.delete(conversations).where(eq(conversations.id, conversationId));
+    return "deleted";
+  } finally {
+    release();
+  }
 }
