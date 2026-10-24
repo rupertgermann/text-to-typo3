@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { and, asc, eq } from "drizzle-orm";
 import { isToolUIPart, type UIMessage } from "ai";
 import { db } from "@/lib/db";
+import { listMcpToolNamesByOperation } from "@/lib/mcp";
 import { conversations, messages, type Conversation } from "@/lib/db/schema";
 import {
   deserializeMessageParts,
@@ -16,7 +17,7 @@ export type ChatTurnTrigger = "submit-message" | "regenerate-message";
 export class ChatTurnResolutionError extends Error {
   constructor(
     message: string,
-    public readonly status: 400 | 404,
+    public readonly status: 400 | 404 | 409,
   ) {
     super(message);
     this.name = "ChatTurnResolutionError";
@@ -49,12 +50,14 @@ export async function resolveChatTurn({
   trigger,
   uiMessages,
   userId,
+  accessToken,
 }: {
   conversationId: string;
   messageId?: string;
   trigger: ChatTurnTrigger;
   uiMessages: UIMessage[];
   userId: string;
+  accessToken?: string;
 }): Promise<ChatTurnResolution> {
   const conversation = await db.query.conversations.findFirst({
     where: and(
@@ -73,6 +76,7 @@ export async function resolveChatTurn({
     const resolved = await resolveRegenerationTurn({
       conversationId,
       messageId,
+      accessToken,
     });
 
     return {
@@ -104,6 +108,7 @@ export async function resolveChatTurn({
     conversationId,
     lastMessage,
     messageId,
+    accessToken,
   });
 
   return {
@@ -117,9 +122,11 @@ export async function resolveChatTurn({
 async function resolveRegenerationTurn({
   conversationId,
   messageId,
+  accessToken,
 }: {
   conversationId: string;
   messageId?: string;
+  accessToken?: string;
 }): Promise<Pick<ChatTurnResolution, "userText" | "historyChange">> {
   const existingMessages = await orderedConversationMessages(conversationId);
   const latestAssistantIndex = existingMessages.findLastIndex(
@@ -140,6 +147,11 @@ async function resolveRegenerationTurn({
       400,
     );
   }
+
+  await assertReplaceableHistory(
+    existingMessages.slice(targetAssistantIndex),
+    accessToken,
+  );
 
   const precedingUserMessage = existingMessages
     .slice(0, targetAssistantIndex)
@@ -287,10 +299,12 @@ async function resolveSubmitTurn({
   conversationId,
   lastMessage,
   messageId,
+  accessToken,
 }: {
   conversationId: string;
   lastMessage: UIMessage | undefined;
   messageId?: string;
+  accessToken?: string;
 }): Promise<Pick<ChatTurnResolution, "userText" | "historyChange">> {
   const userText = lastMessage ? extractMessageText(lastMessage.parts) : "";
 
@@ -320,6 +334,11 @@ async function resolveSubmitTurn({
     if (existingMessages[currentMessageIndex]?.role !== "user") {
       throw new ChatTurnResolutionError("Only user messages can be edited", 400);
     }
+
+    await assertReplaceableHistory(
+      existingMessages.slice(currentMessageIndex + 1),
+      accessToken,
+    );
 
     const trailingMessageIds = existingMessages
       .slice(currentMessageIndex + 1)
@@ -360,4 +379,54 @@ function orderedConversationMessages(conversationId: string) {
     where: eq(messages.conversation_id, conversationId),
     orderBy: [asc(messages.created_at)],
   });
+}
+
+async function assertReplaceableHistory(
+  history: { tool_calls: string | null }[],
+  accessToken = "",
+) {
+  let readToolNames: string[] | undefined;
+  for (const message of history) {
+    for (const part of deserializeMessageParts(message.tool_calls) ?? []) {
+      if (!isToolUIPart(part) || part.state !== "output-available") continue;
+      const output = part.output;
+      if (
+        typeof output === "object" &&
+        output !== null &&
+        (("isError" in output && output.isError === true) ||
+          ("error" in output && Boolean(output.error)))
+      ) {
+        continue;
+      }
+      const meta =
+        typeof output === "object" && output !== null && "_meta" in output
+          ? output._meta
+          : undefined;
+      const operation =
+        typeof meta === "object" && meta !== null && "operation" in meta
+          ? meta.operation
+          : undefined;
+      const toolName = part.type === "dynamic-tool"
+        ? part.toolName : part.type.slice(5);
+      let isWrite = operation === "write" ||
+        (operation !== "read" && toolName === "WriteTable");
+      if (part.type === "dynamic-tool" && toolName.startsWith("mcp.")) {
+        try {
+          readToolNames ??= (await listMcpToolNamesByOperation({ accessToken })).read;
+        } catch {
+          throw new ChatTurnResolutionError(
+            "Unable to verify completed TYPO3 tool results. Continue with a new message so the saved tool results are retained.",
+            409,
+          );
+        }
+        isWrite = !readToolNames.includes(toolName.slice(4));
+      }
+      if (isWrite) {
+        throw new ChatTurnResolutionError(
+          "Completed TYPO3 changes cannot be retried or replaced. Continue with a new message so the saved tool results are retained.",
+          409,
+        );
+      }
+    }
+  }
 }

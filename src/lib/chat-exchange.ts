@@ -1,12 +1,13 @@
 import { asc, eq } from "drizzle-orm";
 import {
+  consumeStream,
   convertToModelMessages,
   stepCountIs,
   streamText,
   type UIMessage,
 } from "ai";
 import type { AuthenticatedUserContext } from "@/lib/auth";
-import { badRequest, notFound, upstreamError } from "@/lib/api-route";
+import { apiError, badRequest, notFound, upstreamError } from "@/lib/api-route";
 import { getAgentLoopMaxSteps, getAgentLoopStepOptions } from "@/lib/agent-loop-policy";
 import { getChatErrorMessage } from "@/lib/chat-errors";
 import {
@@ -52,6 +53,9 @@ const SYSTEM_PROMPT = `TYPO3 MCP operating policy:
 
 Use Web Search when a request depends on current public information, external facts outside the TYPO3 instance, or source-backed answers. Prefer TYPO3 MCP tools over Web Search for facts about the connected TYPO3 site.`;
 
+// shortcut: turn admission is process-local; use shared locking before running multiple app processes.
+const activeConversations = new Set<string>();
+
 export async function streamChatExchange({
   auth,
   conversationId,
@@ -65,165 +69,192 @@ export async function streamChatExchange({
   trigger: ChatTurnTrigger;
   uiMessages: UIMessage[];
 }): Promise<Response> {
-  const userId = auth.user.id;
-  const env = getEnv();
-
-  let turn;
-  try {
-    turn = await resolveChatTurn({
-      conversationId,
-      messageId,
-      trigger,
-      uiMessages,
-      userId,
-    });
-  } catch (error) {
-    if (error instanceof ChatTurnResolutionError) {
-      return error.status === 404
-        ? notFound(error.message)
-        : badRequest(error.message);
-    }
-
-    throw error;
+  const conversationKey = `${auth.user.id}:${conversationId}`;
+  if (activeConversations.has(conversationKey)) {
+    return apiError(
+      "conversation_busy",
+      "This conversation is generating a response. Wait for it to finish before sending another message.",
+      409,
+    );
   }
-
-  const userSettings = await getResolvedUserSettings(userId);
-  let providerResolution;
+  activeConversations.add(conversationKey);
+  const release = () => { activeConversations.delete(conversationKey); };
+  let streaming = false;
   try {
-    providerResolution = resolveChatProvider({
-      envOpenAiApiKey: env.OPENAI_API_KEY,
-      settings: userSettings,
-    });
-  } catch (error) {
-    if (error instanceof ChatProviderResolutionError) {
-      return badRequest(error.message);
-    }
+    const userId = auth.user.id;
+    const env = getEnv();
 
-    throw error;
-  }
-
-  const maxSteps = getAgentLoopMaxSteps();
-  const requireWriteApproval = !Boolean(turn.conversation.auto_approve_writes);
-
-  let tools;
-  try {
-    if (
-      providerResolution.providerKind === "openai" &&
-      providerResolution.supportsBuiltInMcpTool
-    ) {
-      const readToolNames = requireWriteApproval
-        ? (await listMcpToolNamesByOperation({
-            accessToken: auth.accessToken,
-          })).read
-        : [];
-
-      tools = {
-        typo3: providerResolution.provider.tools.mcp({
-          serverLabel: "typo3",
-          serverUrl: getTypo3McpUrl(),
-          serverDescription:
-            "TYPO3 MCP server for reading and updating TYPO3 content and configuration.",
-          requireApproval: requireWriteApproval
-            ? { never: { toolNames: readToolNames } }
-            : "never",
-          headers: auth.accessToken
-            ? { Authorization: `Bearer ${auth.accessToken}` }
-            : undefined,
-        }),
-      };
-    } else {
-      tools = await getMcpTools({
-        sessionId: auth.session.sessionId || `token:${auth.user.id}`,
+    let turn;
+    try {
+      turn = await resolveChatTurn({
+        conversationId,
+        messageId,
+        trigger,
+        uiMessages,
+        userId,
         accessToken: auth.accessToken,
-        requireWriteApproval,
       });
+    } catch (error) {
+      if (error instanceof ChatTurnResolutionError) {
+        if (error.status === 409) {
+          return apiError("completed_tool_results", error.message, 409);
+        }
+        return error.status === 404
+          ? notFound(error.message)
+          : badRequest(error.message);
+      }
+
+      throw error;
     }
-  } catch (error) {
-    return upstreamError(getChatErrorMessage(error, "mcp"));
-  }
 
-  tools = addWebSearchTool({ providerResolution, tools });
+    const userSettings = await getResolvedUserSettings(userId);
+    let providerResolution;
+    try {
+      providerResolution = resolveChatProvider({
+        envOpenAiApiKey: env.OPENAI_API_KEY,
+        settings: userSettings,
+      });
+    } catch (error) {
+      if (error instanceof ChatProviderResolutionError) {
+        return badRequest(error.message);
+      }
 
-  try {
-    turn.claimApproval?.();
-  } catch (error) {
-    if (error instanceof ChatTurnResolutionError) return badRequest(error.message);
-    throw error;
-  }
+      throw error;
+    }
 
-  const dbMessages = await db.query.messages.findMany({
-    where: eq(messages.conversation_id, conversationId),
-    orderBy: [asc(messages.created_at)],
-  });
+    const maxSteps = getAgentLoopMaxSteps();
+    const requireWriteApproval = !Boolean(turn.conversation.auto_approve_writes);
 
-  const originalMessages: UIMessage[] = dbMessages
-    .filter((msg) => !turn.historyChange?.removeMessageIds.includes(msg.id))
-    .map((msg) =>
-      turn.historyChange?.userMessage?.id === msg.id
-        ? turn.historyChange.userMessage
-        : {
-            id: msg.id,
-            role: msg.role as UIMessage["role"],
-            parts: deserializeMessageParts(msg.tool_calls) ?? [
-              { type: "text", text: msg.content },
-            ],
-          },
+    let tools;
+    try {
+      if (
+        providerResolution.providerKind === "openai" &&
+        providerResolution.supportsBuiltInMcpTool
+      ) {
+        const readToolNames = requireWriteApproval
+          ? (await listMcpToolNamesByOperation({ accessToken: auth.accessToken })).read
+          : [];
+
+        tools = {
+          typo3: providerResolution.provider.tools.mcp({
+            serverLabel: "typo3",
+            serverUrl: getTypo3McpUrl(),
+            serverDescription:
+              "TYPO3 MCP server for reading and updating TYPO3 content and configuration.",
+            requireApproval: requireWriteApproval
+              ? { never: { toolNames: readToolNames } }
+              : "never",
+            headers: auth.accessToken
+              ? { Authorization: `Bearer ${auth.accessToken}` }
+              : undefined,
+          }),
+        };
+      } else {
+        tools = await getMcpTools({
+          sessionId: auth.session.sessionId || `token:${auth.user.id}`,
+          accessToken: auth.accessToken,
+          requireWriteApproval,
+        });
+      }
+    } catch (error) {
+      return upstreamError(getChatErrorMessage(error, "mcp"));
+    }
+
+    tools = addWebSearchTool({ providerResolution, tools });
+
+    try {
+      turn.claimApproval?.();
+    } catch (error) {
+      if (error instanceof ChatTurnResolutionError) return badRequest(error.message);
+      throw error;
+    }
+
+    const dbMessages = await db.query.messages.findMany({
+      where: eq(messages.conversation_id, conversationId),
+      orderBy: [asc(messages.created_at)],
+    });
+
+    const originalMessages: UIMessage[] = dbMessages
+      .filter((msg) => !turn.historyChange?.removeMessageIds.includes(msg.id))
+      .map((msg) =>
+        turn.historyChange?.userMessage?.id === msg.id
+          ? turn.historyChange.userMessage
+          : {
+              id: msg.id,
+              role: msg.role as UIMessage["role"],
+              parts: deserializeMessageParts(msg.tool_calls) ?? [
+                { type: "text", text: msg.content },
+              ],
+            },
+      );
+
+    const modelInputMessages = prepareMessagesForModelInput(originalMessages);
+    const modelMessages = await convertToModelMessages(
+      modelInputMessages.map((message) => ({
+        role: message.role,
+        parts: message.parts,
+      })),
     );
 
-  const modelInputMessages = prepareMessagesForModelInput(originalMessages);
-  const modelMessages = await convertToModelMessages(
-    modelInputMessages.map((message) => ({
-      role: message.role,
-      parts: message.parts,
-    })),
-  );
+    const budgetedModelMessages = budgetModelMessages(modelMessages, {
+      contextWindow: providerResolution.contextWindow,
+      reservedOutputTokens: 4096,
+    });
 
-  const budgetedModelMessages = budgetModelMessages(modelMessages, {
-    contextWindow: providerResolution.contextWindow,
-    reservedOutputTokens: 4096,
-  });
+    const result = streamText({
+      model: providerResolution.model,
+      maxRetries: 0,
+      system: [SYSTEM_PROMPT, env.TYPO3_MCP_SYSTEM_PROMPT].filter(Boolean).join("\n\n"),
+      messages: budgetedModelMessages,
+      stopWhen: stepCountIs(maxSteps),
+      tools,
+      prepareStep: ({ stepNumber, steps }) =>
+        getAgentLoopStepOptions({
+          isChatCompletionsPath: providerResolution.isChatCompletionsPath,
+          userText: turn.userText,
+          stepNumber,
+          maxSteps,
+          steps,
+        }),
+    });
 
-  const result = streamText({
-    model: providerResolution.model,
-    maxRetries: 0,
-    system: [SYSTEM_PROMPT, env.TYPO3_MCP_SYSTEM_PROMPT].filter(Boolean).join("\n\n"),
-    messages: budgetedModelMessages,
-    stopWhen: stepCountIs(maxSteps),
-    tools,
-    prepareStep: ({ stepNumber, steps }) =>
-      getAgentLoopStepOptions({
-        isChatCompletionsPath: providerResolution.isChatCompletionsPath,
-        userText: turn.userText,
-        stepNumber,
-        maxSteps,
-        steps,
-      }),
-  });
+    let streamFailed = false;
+    const response = result.toUIMessageStreamResponse({
+      // Finish recording tool results even if the browser disconnects.
+      consumeSseStream: ({ stream }) => {
+        void consumeStream({ stream }).finally(release);
+      },
+      originalMessages: turn.continuationAssistantMessageId
+        ? originalMessages
+        : undefined,
+      generateMessageId: () => crypto.randomUUID(),
+      onError: (error) => {
+        streamFailed = true;
+        return getChatErrorMessage(error, "provider");
+      },
+      onFinish: async ({ responseMessage, isAborted }) => {
+        const failed = streamFailed || isAborted;
+        const tokenUsage = failed
+          ? { inputTokens: null, outputTokens: null }
+          : normalizeLanguageModelUsage(await result.totalUsage);
+        const { titleGeneration } = await persistResponseMessage({
+          historyChange: failed ? null : turn.historyChange,
+          continuationAssistantMessageId: turn.continuationAssistantMessageId,
+          conversation: turn.conversation,
+          responseMessage,
+          titleGenerator: failed
+            ? undefined
+            : createModelTitleGenerator(providerResolution.model),
+          tokenUsage,
+          userText: turn.userText,
+        });
 
-  let streamFailed = false;
-  return result.toUIMessageStreamResponse({
-    originalMessages,
-    generateMessageId: () => crypto.randomUUID(),
-    onError: (error) => {
-      streamFailed = true;
-      return getChatErrorMessage(error, "provider");
-    },
-    onFinish: async ({ responseMessage }) => {
-      if (streamFailed && !turn.continuationAssistantMessageId) return;
-      const tokenUsage = streamFailed
-        ? { inputTokens: null, outputTokens: null }
-        : normalizeLanguageModelUsage(await result.totalUsage);
-      const { titleGeneration } = await persistResponseMessage({
-        historyChange: turn.historyChange,
-        continuationAssistantMessageId: turn.continuationAssistantMessageId,
-        conversation: turn.conversation,
-        responseMessage,
-        titleGenerator: createModelTitleGenerator(providerResolution.model),
-        tokenUsage,
-        userText: turn.userText,
-      });
-
-      void titleGeneration;
-    },
-  });
+        void titleGeneration;
+      },
+    });
+    streaming = true;
+    return response;
+  } finally {
+    if (!streaming) release();
+  }
 }

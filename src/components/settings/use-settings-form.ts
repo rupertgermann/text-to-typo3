@@ -141,6 +141,7 @@ export function useSettingsForm({
 }) {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [draftInitialized, setDraftInitialized] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [catalogState, setCatalogState] = useState<{
     models: AvailableModel[];
@@ -182,7 +183,13 @@ export function useSettingsForm({
   }, [settingsError]);
 
   useEffect(() => {
-    if (!open || !settings) {
+    if (!open) {
+      setDraftInitialized(false);
+      setOpenaiKey("");
+      setCustomProviders([]);
+      return;
+    }
+    if (draftInitialized || !settings) {
       return;
     }
 
@@ -195,7 +202,8 @@ export function useSettingsForm({
     );
     setSelectedModelId(settings.modelId ?? "");
     setSelectedLmStudioModelId(settings.lmstudioModelId ?? "");
-  }, [open, settings]);
+    setDraftInitialized(true);
+  }, [draftInitialized, open, settings]);
 
   const loadModels = useCallback(async (options?: { lmstudioBaseUrl?: string }) => {
     const controller = new AbortController();
@@ -320,6 +328,10 @@ export function useSettingsForm({
   }
 
   async function handleSave() {
+    if (!open || !draftInitialized) {
+      return;
+    }
+
     setSaving(true);
     setError(null);
 
@@ -506,6 +518,7 @@ export function useSettingsForm({
     customProviderById,
     customProviderConnections,
     customProviders,
+    draftInitialized,
     error,
     handleSave,
     lmStudioModels,

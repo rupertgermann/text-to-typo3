@@ -229,7 +229,7 @@ export function SettingsModal({
           <Button
             type="button"
             onClick={() => void form.handleSave()}
-            disabled={form.saving}
+            disabled={form.saving || !form.draftInitialized}
           >
             {form.saving ? "Saving..." : "Save settings"}
             <ArrowRight className="h-4 w-4" />

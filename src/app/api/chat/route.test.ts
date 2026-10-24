@@ -1,12 +1,15 @@
+import { deferred } from "@/test/deferred";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { asc, eq } from "drizzle-orm";
 import { DefaultChatTransport, isToolUIPart, type UIMessage } from "ai";
 import { Chat } from "@ai-sdk/react";
 import { POST } from "./route";
+import { GET as exportConversation } from "../conversations/[id]/export/route";
 import { db, setupTestDatabase, type TestDatabase } from "@/test/database";
 import { conversations, messages, userSettings, users } from "@/lib/db/schema";
 import { deserializeMessageParts } from "@/lib/chat-message-parts";
 import { encrypt } from "@/lib/crypto";
+import * as chatPersistence from "@/lib/chat-turn-persistence";
 import { resetMcpCachesForTests } from "@/lib/mcp";
 import { startFakeMcpServer, type FakeMcpServer } from "@/test/fake-mcp-server";
 import {
@@ -39,9 +42,237 @@ describe("chat route integration", () => {
     fakeModel = null;
     fakeMcp = null;
     resetMcpCachesForTests();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     testDatabase?.cleanup();
     testDatabase = null;
+  });
+
+  it.each(["new", "edit", "regenerate"])("preserves completed mutations after a failed %s turn and refuses destructive replay", async (kind) => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [
+      createToolCallResponse({ toolCallId: "completed-write", toolName: "WriteTable", argumentsJson: JSON.stringify({ action: "create", table: "pages", data: { title: "Created" } }) }),
+      { chunks: [{ error: { message: "Later model failure", type: "server_error", code: "server_error" } }] },
+    ] });
+    await seedTokenModeConversation({ conversationId: "failed-write", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Writes", autoApproveWrites: true });
+    if (kind !== "new") await db.insert(messages).values({ id: "write-user", conversation_id: "failed-write", role: "user", content: "Create a page", created_at: 1 });
+    if (kind !== "new") await db.insert(messages).values({ id: "old-answer", conversation_id: "failed-write", role: "assistant", content: "Original answer", created_at: 2 });
+    const before = await persistedUiMessages("failed-write");
+    const response = await POST(new Request("http://localhost/api/chat", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversationId: "failed-write", trigger: kind === "regenerate" ? "regenerate-message" : "submit-message", messageId: kind === "new" ? undefined : kind === "regenerate" ? "old-answer" : "write-user", messages: kind === "new" ? [{ id: "write-user", role: "user", parts: [{ type: "text", text: "Create a page" }] }] : kind === "edit" ? [{ ...before[0], parts: [{ type: "text", text: "Changed question" }] }] : before }),
+    }) as never);
+    expect(await response.text()).toContain('"type":"error"');
+    const saved = await persistedUiMessages("failed-write");
+    expect(saved.slice(0, before.length)).toEqual(before);
+    expect(saved.at(-1)?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ toolCallId: "completed-write", state: "output-available" })]));
+    const reloaded = new Chat({ messages: saved, transport: new DefaultChatTransport({ api: "http://localhost/api/chat", body: { conversationId: "failed-write" }, fetch: async (input, init) => POST(new Request(String(input), init) as never) }) });
+    await reloaded.sendMessage({ messageId: "write-user", parts: saved[0].parts });
+    expect(reloaded.error?.message).toContain("new message");
+    expect(await persistedUiMessages("failed-write")).toEqual(saved);
+    const regenerate = await POST(new Request("http://localhost/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ conversationId: "failed-write", trigger: "regenerate-message", messageId: saved.at(-1)?.id, messages: saved }) }) as never);
+    expect(regenerate.status).toBe(409);
+    expect(await regenerate.text()).toContain("new message");
+    expect(fakeMcp.toolCalls).toHaveLength(1);
+  });
+
+  it("rejects an overlapping submission before inserting it and permits other conversations", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [createTextResponse({ text: "Answer" }), createTextResponse({ text: "Other answer" }), createTextResponse({ text: "Later answer" })] });
+    await seedTokenModeConversation({ conversationId: "busy", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Busy" });
+    await db.insert(conversations).values({ id: "independent", user_id: LOCAL_USER_ID, title: "Independent" });
+    const responses = await Promise.all([postChat({ conversationId: "busy", text: "ALPHA" }), postChat({ conversationId: "busy", text: "BETA" }), postChat({ conversationId: "independent", text: "GAMMA" })]);
+    expect(responses.map((response) => response.status)).toEqual([200, 409, 200]);
+    await Promise.all(responses.map((response) => response.text()));
+    expect((await persistedUiMessages("busy")).filter((message) => message.role === "user")).toHaveLength(1);
+    expect(JSON.stringify(fakeModel.chatRequests)).not.toContain("BETA");
+    const later = await postChat({ conversationId: "busy", text: "DELTA" });
+    expect(later.status).toBe(200);
+    await later.text();
+  });
+
+  it("retains partial text after provider failure", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [{ chunks: [...createTextResponse({ text: "Partial answer" }).chunks.slice(0, 1), { error: { message: "Later failure", type: "server_error", code: "server_error" } }] }] });
+    await seedTokenModeConversation({ conversationId: "partial", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Partial" });
+    const response = await postChat({ conversationId: "partial", text: "Question" });
+    await response.text();
+    expect((await latestAssistantMessage("partial"))?.content).toBe("Partial answer");
+  });
+
+  it.each(["reload approval", "mixed read approval", "denial"])("persists built-in MCP %s through the SDK and export", async (mode) => {
+    const includeRead = mode === "mixed read approval";
+    const approved = mode !== "denial";
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [] });
+    await seedTokenModeConversation({ conversationId: "dynamic", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Dynamic" });
+    await db.update(userSettings).set({ model_id: "gpt-5.4-nano", lmstudio_model_id: null, lmstudio_base_url: null });
+    vi.stubEnv("OPENAI_API_KEY", "synthetic");
+    const realFetch = globalThis.fetch;
+    const providerRequests: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!String(input).startsWith("https://api.openai.com/")) return realFetch(input, init);
+      providerRequests.push(String(init?.body));
+      const item = providerRequests.length === 1
+        ? { type: "mcp_approval_request", id: "approval-item", server_label: "typo3", name: "WriteTable", arguments: JSON.stringify({ action: "create", table: "pages", data: { title: "Created" } }) }
+        : { type: "mcp_call", status: "completed", id: "completed-item", approval_request_id: "approval-item", server_label: "typo3", name: "WriteTable", arguments: JSON.stringify({ action: "create", table: "pages", data: { title: "Created" } }), output: JSON.stringify({ uid: 123 }), error: null };
+      const events = [
+        { type: "response.created", response: { id: "resp_test", created_at: 1, model: "gpt-5.4-nano" } },
+        ...(includeRead && providerRequests.length === 1 ? [
+          { type: "response.output_item.done", output_index: 0, item: { type: "mcp_call", status: "completed", id: "completed-read", server_label: "typo3", name: "GetPageTree", arguments: "{}", output: JSON.stringify({ title: "Home" }), error: null } },
+        ] : []),
+        ...(approved || providerRequests.length === 1 ? [
+          { type: "response.output_item.added", output_index: 1, item },
+          { type: "response.output_item.done", output_index: 1, item },
+        ] : []),
+        { type: "response.completed", response: { id: "resp_test", usage: { input_tokens: 10, output_tokens: 10 }, incomplete_details: null } },
+      ];
+      return new Response(events.map((value) => `data: ${JSON.stringify(value)}\n\n`).join(""), { headers: { "Content-Type": "text/event-stream" } });
+    });
+    const transport = new DefaultChatTransport({ api: "http://localhost/api/chat", body: { conversationId: "dynamic" }, fetch: async (input, init) => POST(new Request(String(input), init) as never) });
+    const chat = new Chat({ transport });
+    await chat.sendMessage({ text: "Create a page" });
+    expect(chat.error).toBeUndefined();
+    const pending = await persistedUiMessages("dynamic");
+    expect(pending.at(-1)?.id).toBe(chat.lastMessage?.id);
+    expect(pending.at(-1)?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "dynamic-tool", state: "approval-requested" })]));
+    const reloaded = includeRead ? chat : new Chat({ transport, messages: pending });
+    await reloaded.addToolApprovalResponse({ id: "approval-item", approved });
+    await reloaded.sendMessage();
+    expect(reloaded.error).toBeUndefined();
+    const completed = await persistedUiMessages("dynamic");
+    expect(completed).toHaveLength(2);
+    expect(completed.at(-1)?.id).toBe(pending.at(-1)?.id);
+    expect(providerRequests[1]).toContain(`"approve":${approved}`);
+    if (!approved) {
+      expect(completed.at(-1)?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "dynamic-tool", approval: { id: "approval-item", approved: false } })]));
+      expect(completed.at(-1)?.parts.some((part) => isToolUIPart(part) && part.state === "output-available")).toBe(false);
+      return;
+    }
+    expect(completed.at(-1)?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "dynamic-tool", state: "output-available", output: expect.objectContaining({ name: "WriteTable" }) })]));
+    const exported = await exportConversation(new Request("http://localhost/api/conversations/dynamic/export") as never, { params: Promise.resolve({ id: "dynamic" }) });
+    const markdown = await exported.text();
+    expect(markdown).toContain("WriteTable");
+    expect(markdown).toContain("123");
+    await reloaded.sendMessage({ messageId: completed[0].id, parts: completed[0].parts });
+    expect(reloaded.error?.message).toContain("new message");
+    expect(providerRequests).toHaveLength(2);
+    expect(await persistedUiMessages("dynamic")).toEqual(completed);
+  });
+
+  it.each(["edit", "regenerate"])("allows %s after a completed read-only tool", async (kind) => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [createToolCallResponse({ toolCallId: "read", toolName: "GetPageTree", argumentsJson: "{}" }), createTextResponse({ text: "Read complete" }), createTextResponse({ text: "Replacement" })] });
+    await seedTokenModeConversation({ conversationId: "readonly", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Read" });
+    const chat = new Chat({ transport: new DefaultChatTransport({ api: "http://localhost/api/chat", body: { conversationId: "readonly" }, fetch: async (input, init) => POST(new Request(String(input), init) as never) }) });
+    await chat.sendMessage({ text: "Read the page tree" });
+    expect(chat.error).toBeUndefined();
+    if (kind === "edit") await chat.sendMessage({ messageId: chat.messages[0].id, text: "Read it differently" });
+    else await chat.regenerate({ messageId: chat.lastMessage?.id });
+    expect(chat.error).toBeUndefined();
+    expect((await latestAssistantMessage("readonly"))?.content).toBe("Replacement");
+  });
+
+  it("regenerates appended partial text without overwriting the retained original assistant", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [
+      { chunks: [...createTextResponse({ text: "Partial replacement" }).chunks.slice(0, 1), { error: { message: "Later failure", type: "server_error", code: "server_error" } }] },
+      createTextResponse({ text: "Complete replacement" }),
+    ] });
+    await seedTokenModeConversation({ conversationId: "partial-replacement", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Partial" });
+    await db.insert(messages).values([
+      { id: "partial-user", conversation_id: "partial-replacement", role: "user", content: "Original question", created_at: 1 },
+      { id: "original-assistant", conversation_id: "partial-replacement", role: "assistant", content: "Original answer", created_at: 2 },
+    ]);
+    const transport = new DefaultChatTransport({ api: "http://localhost/api/chat", body: { conversationId: "partial-replacement" }, fetch: async (input, init) => POST(new Request(String(input), init) as never) });
+    const chat = new Chat({ messages: await persistedUiMessages("partial-replacement"), transport });
+    await chat.sendMessage({ messageId: "partial-user", text: "Edited question" });
+    expect(chat.error).toBeDefined();
+    await vi.waitFor(async () => expect(await persistedUiMessages("partial-replacement")).toHaveLength(3));
+    const saved = await persistedUiMessages("partial-replacement");
+    expect(saved).toHaveLength(3);
+    const reloaded = new Chat({ messages: saved, transport });
+    await reloaded.regenerate({ messageId: saved.at(-1)?.id });
+    expect(reloaded.error).toBeUndefined();
+    const completed = await persistedUiMessages("partial-replacement");
+    expect(completed).toHaveLength(3);
+    expect(completed[1]).toEqual(saved[1]);
+    expect(completed.at(-1)?.id).toBe(reloaded.lastMessage?.id);
+    expect(completed.at(-1)?.parts).toEqual(expect.arrayContaining([{ type: "text", text: "Complete replacement", state: "done" }]));
+  });
+
+  it.each([false, true])("holds the conversation through persistence and releases when persistence throws=%s", async (throws) => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [createTextResponse({ text: "First" }), createTextResponse({ text: "Later" })] });
+    await seedTokenModeConversation({ conversationId: "persist-lock", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Lock" });
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    const persist = chatPersistence.persistResponseMessage;
+    vi.spyOn(chatPersistence, "persistResponseMessage").mockImplementationOnce(async (input) => {
+      entered.resolve();
+      await resume.promise;
+      if (throws) throw new Error("Persistence failed");
+      return persist(input);
+    });
+    const first = await postChat({ conversationId: "persist-lock", text: "First" });
+    const finished = first.text().catch((error: unknown) => error);
+    await entered.promise;
+    const overlap = await postChat({ conversationId: "persist-lock", text: "Rejected" });
+    expect(overlap.status).toBe(409);
+    resume.resolve();
+    await finished;
+    const later = await postChat({ conversationId: "persist-lock", text: "Later" });
+    expect(later.status).toBe(200);
+    await later.text();
+    expect((await persistedUiMessages("persist-lock")).filter((message) => message.role === "user")).toHaveLength(2);
+  });
+
+  it("persists the response and releases its conversation when the client cancels the stream", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [createTextResponse({ text: "Completed in background" }), createTextResponse({ text: "Later" })] });
+    await seedTokenModeConversation({ conversationId: "abort-lock", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Abort" });
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    const realFetch = globalThis.fetch;
+    let intercept = true;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/chat/completions") && intercept) {
+        intercept = false;
+        entered.resolve();
+        await resume.promise;
+      }
+      return realFetch(input, init);
+    });
+    const response = await postChat({ conversationId: "abort-lock", text: "First" });
+    await entered.promise;
+    const cancelled = response.body?.cancel();
+    expect((await postChat({ conversationId: "abort-lock", text: "While finishing" })).status).toBe(409);
+    resume.resolve();
+    await cancelled;
+    await vi.waitFor(async () => expect((await latestAssistantMessage("abort-lock"))?.content).toBe("Completed in background"));
+    const later = await postChat({ conversationId: "abort-lock", text: "Later" });
+    expect(later.status).toBe(200);
+    await later.text();
+  });
+
+  it("retains edited image parts through the API and reload, including explicit replacement", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [createTextResponse({ text: "Revised answer" }), createTextResponse({ text: "New image answer" })] });
+    await seedTokenModeConversation({ conversationId: "edit-images", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Images" });
+    const originalImage = { type: "file", mediaType: "image/png", filename: "original.png", url: "data:image/png;base64,aW1hZ2U=" } satisfies UIMessage["parts"][number];
+    const newImage = { ...originalImage, filename: "replacement.png", url: "data:image/png;base64,bmV3" };
+    await db.insert(messages).values({ id: "image-user", conversation_id: "edit-images", role: "user", content: "Original question", tool_calls: JSON.stringify([{ type: "text", text: "Original question" }, originalImage]) });
+    const transport = new DefaultChatTransport({ api: "http://localhost/api/chat", body: { conversationId: "edit-images" }, fetch: async (input, init) => POST(new Request(String(input), init) as never) });
+    const chat = new Chat({ transport, messages: await persistedUiMessages("edit-images") });
+    await chat.sendMessage({ messageId: "image-user", parts: [{ type: "text", text: "Revised question" }, originalImage] });
+    expect(chat.error).toBeUndefined();
+    const saved = await persistedUiMessages("edit-images");
+    expect(saved[0].parts).toEqual([{ type: "text", text: "Revised question" }, originalImage]);
+    const reloaded = new Chat({ transport, messages: saved });
+    await reloaded.sendMessage({ messageId: "image-user", parts: [newImage] });
+    expect(reloaded.error).toBeUndefined();
+    expect((await persistedUiMessages("edit-images"))[0].parts).toEqual([newImage]);
   });
 
   it("keeps SDK message IDs through send, edit, regenerate and approval without reloading", async () => {
@@ -124,7 +355,7 @@ describe("chat route integration", () => {
     const request = () => postChatMessages({ conversationId: "approval-race", messageId: "race-assistant", messages: responded });
     const responses = await Promise.all([request(), request()]);
     await Promise.all(responses.map((response) => response.text()));
-    expect(responses.map((response) => response.status).sort()).toEqual([200, 400]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
     const completed = await latestAssistantMessage("approval-race");
     expect(deserializeMessageParts(completed?.tool_calls)).toEqual(expect.arrayContaining([expect.objectContaining({ toolCallId: "race-call", state: "output-available" })]));
     const replay = await request();

@@ -3,6 +3,8 @@ import { badRequest, withAuth } from "@/lib/api-route";
 import {
   type CustomProviderInput,
   getPublicUserSettings,
+  getUserSettingsRow,
+  updateModelContextWindow,
   upsertUserSettings,
   UserSettingsValidationError,
 } from "@/lib/user-settings";
@@ -103,29 +105,23 @@ export const PATCH = withAuth(async (request: NextRequest, auth) => {
       lmstudioModelId: asNullableString(body.lmstudioModelId),
       customProviders: asCustomProviders(body.customProviders),
     });
-    const selectedModelId = updated.modelId;
     if (
-      selectedModelId &&
-      (body.modelId !== undefined ||
-        body.lmstudioBaseUrl !== undefined ||
-        body.lmstudioModelId !== undefined ||
-        body.customProviders !== undefined)
+      body.modelId !== undefined ||
+      body.lmstudioBaseUrl !== undefined ||
+      body.lmstudioModelId !== undefined ||
+      body.customProviders !== undefined
     ) {
-      const staticHint = getOpenAIModelContextWindowHint(selectedModelId);
-      const modelContextWindow =
-        staticHint ??
-        (await listAvailableModelsForUser(auth.user.id)).models.find(
-          (model) => model.id === selectedModelId,
-        )?.contextWindow ??
-        null;
-
-      updated = await upsertUserSettings(auth.user.id, {
-        modelContextWindow,
-      });
-    } else if (!selectedModelId && body.modelId !== undefined) {
-      updated = await upsertUserSettings(auth.user.id, {
-        modelContextWindow: null,
-      });
+      const expected = await getUserSettingsRow(auth.user.id);
+      if (expected) {
+        const selectedModelId = expected.model_id;
+        const modelContextWindow = selectedModelId
+          ? getOpenAIModelContextWindowHint(selectedModelId) ??
+            (await listAvailableModelsForUser(auth.user.id)).models.find(
+              (model) => model.id === selectedModelId,
+            )?.contextWindow ?? null
+          : null;
+        updated = await updateModelContextWindow(expected, modelContextWindow);
+      }
     }
   } catch (error) {
     if (error instanceof UserSettingsValidationError) {

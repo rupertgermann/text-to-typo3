@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
 import type { LanguageModel, UIMessage } from "ai";
-import { generateText } from "ai";
+import { generateText, isToolUIPart } from "ai";
 import { db } from "@/lib/db";
 import { conversations, messages, type Conversation } from "@/lib/db/schema";
 import {
@@ -77,7 +77,7 @@ export async function persistChatTurn({
 }): Promise<{ titleGeneration: Promise<void> | null }> {
   if (
     assistantText.trim() ||
-    responseParts.some((part) => part.type.startsWith("tool-"))
+    responseParts.some(isToolUIPart)
   ) {
     const assistantMessageValues = {
       content: assistantText,

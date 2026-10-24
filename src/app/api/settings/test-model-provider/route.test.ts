@@ -1,5 +1,7 @@
+import { deferred } from "@/test/deferred";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { createServer } from "node:http";
 import { POST } from "./route";
 import { setupTestDatabase, type TestDatabase } from "@/test/database";
 import { LOCAL_TOKEN_USER_ID, seedLocalTokenUser, stubTokenAuthEnv } from "@/test/auth";
@@ -21,6 +23,7 @@ describe("model provider connection test route", () => {
     await fakeModel?.close();
     fakeModel = null;
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     testDatabase?.cleanup();
     testDatabase = null;
@@ -39,6 +42,66 @@ describe("model provider connection test route", () => {
     );
 
     expect(response.status).toBe(401);
+  });
+
+  it.each([
+    { stage: "headers", stop: "deadline" },
+    { stage: "body", stop: "deadline" },
+    { stage: "headers", stop: "request abort" },
+    { stage: "body", stop: "request abort" },
+  ])("aborts stalled $stage on $stop", async ({ stage, stop }) => {
+    stubTokenAuthEnv();
+    const upstreamEntered = deferred<void>();
+    const bodyReading = deferred<void>();
+    const readJson = Response.prototype.json;
+    vi.spyOn(Response.prototype, "json").mockImplementation(function (this: Response) {
+      if (this.url.endsWith("/v1/models")) bodyReading.resolve();
+      return readJson.call(this);
+    });
+    let upstreamClosed = false;
+    const server = createServer((_request, response) => {
+      response.on("close", () => { upstreamClosed = true; });
+      if (stage === "body") {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.write('{"data":[');
+      }
+      upstreamEntered.resolve();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing test server port");
+    const timeout = AbortSignal.timeout.bind(AbortSignal);
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    if (stop === "deadline") timeoutSpy.mockImplementation(() => timeout(50));
+    const controller = new AbortController();
+    const response = POST(new NextRequest("http://localhost/api/settings/test-model-provider", {
+      method: "POST",
+      signal: controller.signal,
+      body: JSON.stringify({ baseUrl: `http://127.0.0.1:${address.port}/v1`, apiKey: "secret-model-key" }),
+    }));
+
+    try {
+      await upstreamEntered.promise;
+      if (stop === "request abort") {
+        if (stage === "body") await bodyReading.promise;
+        controller.abort();
+      }
+      const result = await Promise.race([
+        response,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 250)),
+      ]);
+      expect(result, "the route should finish while the provider is still stalled").not.toBeNull();
+      expect(await result?.json()).toEqual({
+        ok: false,
+        error: { code: "unreachable", message: "The provider endpoint could not be reached." },
+      });
+      await vi.waitFor(() => expect(upstreamClosed).toBe(true));
+      expect(timeoutSpy).toHaveBeenCalledWith(10_000);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await response;
+    }
   });
 
   it("reports model counts on success without leaking API keys", async () => {
