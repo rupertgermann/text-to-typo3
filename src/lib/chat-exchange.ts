@@ -87,28 +87,6 @@ export async function streamChatExchange({
     throw error;
   }
 
-  const dbMessages = await db.query.messages.findMany({
-    where: eq(messages.conversation_id, conversationId),
-    orderBy: [asc(messages.created_at)],
-  });
-
-  const originalMessages: UIMessage[] = dbMessages.map((msg) => ({
-    id: msg.id,
-    role: msg.role as "user" | "assistant" | "system",
-    parts:
-      deserializeMessageParts(msg.tool_calls) ?? [
-        { type: "text", text: msg.content },
-      ],
-  }));
-
-  const modelInputMessages = prepareMessagesForModelInput(originalMessages);
-  const modelMessages = await convertToModelMessages(
-    modelInputMessages.map((message) => ({
-      role: message.role,
-      parts: message.parts,
-    })),
-  );
-
   const userSettings = await getResolvedUserSettings(userId);
   let providerResolution;
   try {
@@ -124,10 +102,6 @@ export async function streamChatExchange({
     throw error;
   }
 
-  const budgetedModelMessages = budgetModelMessages(modelMessages, {
-    contextWindow: providerResolution.contextWindow,
-    reservedOutputTokens: 4096,
-  });
   const maxSteps = getAgentLoopMaxSteps();
   const requireWriteApproval = !Boolean(turn.conversation.auto_approve_writes);
 
@@ -170,6 +144,45 @@ export async function streamChatExchange({
 
   tools = addWebSearchTool({ providerResolution, tools });
 
+  try {
+    turn.claimApproval?.();
+  } catch (error) {
+    if (error instanceof ChatTurnResolutionError) return badRequest(error.message);
+    throw error;
+  }
+
+  const dbMessages = await db.query.messages.findMany({
+    where: eq(messages.conversation_id, conversationId),
+    orderBy: [asc(messages.created_at)],
+  });
+
+  const originalMessages: UIMessage[] = dbMessages
+    .filter((msg) => !turn.historyChange?.removeMessageIds.includes(msg.id))
+    .map((msg) =>
+      turn.historyChange?.userMessage?.id === msg.id
+        ? turn.historyChange.userMessage
+        : {
+            id: msg.id,
+            role: msg.role as UIMessage["role"],
+            parts: deserializeMessageParts(msg.tool_calls) ?? [
+              { type: "text", text: msg.content },
+            ],
+          },
+    );
+
+  const modelInputMessages = prepareMessagesForModelInput(originalMessages);
+  const modelMessages = await convertToModelMessages(
+    modelInputMessages.map((message) => ({
+      role: message.role,
+      parts: message.parts,
+    })),
+  );
+
+  const budgetedModelMessages = budgetModelMessages(modelMessages, {
+    contextWindow: providerResolution.contextWindow,
+    reservedOutputTokens: 4096,
+  });
+
   const result = streamText({
     model: providerResolution.model,
     maxRetries: 0,
@@ -187,12 +200,21 @@ export async function streamChatExchange({
       }),
   });
 
+  let streamFailed = false;
   return result.toUIMessageStreamResponse({
     originalMessages,
-    onError: (error) => getChatErrorMessage(error, "provider"),
+    generateMessageId: () => crypto.randomUUID(),
+    onError: (error) => {
+      streamFailed = true;
+      return getChatErrorMessage(error, "provider");
+    },
     onFinish: async ({ responseMessage }) => {
-      const tokenUsage = normalizeLanguageModelUsage(await result.totalUsage);
+      if (streamFailed && !turn.continuationAssistantMessageId) return;
+      const tokenUsage = streamFailed
+        ? { inputTokens: null, outputTokens: null }
+        : normalizeLanguageModelUsage(await result.totalUsage);
       const { titleGeneration } = await persistResponseMessage({
+        historyChange: turn.historyChange,
         continuationAssistantMessageId: turn.continuationAssistantMessageId,
         conversation: turn.conversation,
         responseMessage,

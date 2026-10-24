@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { asc, eq } from "drizzle-orm";
-import type { UIMessage } from "ai";
+import { isToolUIPart, type UIMessage } from "ai";
 import { db, setupTestDatabase, type TestDatabase } from "@/test/database";
 import { conversations, messages, users } from "@/lib/db/schema";
 import { deserializeMessageParts } from "@/lib/chat-message-parts";
@@ -52,11 +52,12 @@ describe("chat turn resolution", () => {
     expect(turn.userText).toBe("Create a page");
     expect(turn.continuationAssistantMessageId).toBeNull();
     expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe("incoming-user");
     expect(rows[0]?.role).toBe("user");
     expect(rows[0]?.content).toBe("Create a page");
   });
 
-  it("resolves regeneration by deleting only the latest assistant response", async () => {
+  it("resolves regeneration without deleting the original response", async () => {
     await db.insert(messages).values([
       {
         id: "regen-user",
@@ -99,7 +100,34 @@ describe("chat turn resolution", () => {
 
     expect(turn.userText).toBe("Try again");
     expect(turn.continuationAssistantMessageId).toBeNull();
-    expect(rows.map((message) => message.id)).toEqual(["regen-user"]);
+    expect(rows.map((message) => message.id)).toEqual(["regen-user", "regen-assistant"]);
+  });
+
+  it.each([false, true])("rejects incomplete or previously claimed approval batches (claimed=%s)", async (previouslyClaimed) => {
+    const pending: UIMessage["parts"] = ["a", "b"].map((id) => ({
+      type: "tool-WriteTable",
+      toolCallId: `call-${id}`,
+      state: "approval-requested",
+      input: { table: "pages", data: { title: id } },
+      approval: { id: `approval-${id}` },
+    }));
+    const decisions: UIMessage["parts"] = pending.map((part) =>
+      isToolUIPart(part) && part.state === "approval-requested"
+        ? { ...part, state: "approval-responded", approval: { id: part.approval.id, approved: true } }
+        : part,
+    );
+    const stored = previouslyClaimed ? [decisions[0], pending[1]] : pending;
+    await db.insert(messages).values([
+      { id: "batch-user", conversation_id: "conversation-turns", role: "user", content: "Write both", created_at: 1 },
+      { id: "batch-assistant", conversation_id: "conversation-turns", role: "assistant", content: "", tool_calls: JSON.stringify(stored), created_at: 2 },
+    ]);
+    await expect(resolveChatTurn({
+      conversationId: "conversation-turns",
+      trigger: "submit-message",
+      userId: USER_ID,
+      uiMessages: [{ id: "batch-assistant", role: "assistant", parts: previouslyClaimed ? decisions : [decisions[0], pending[1]] }],
+    })).rejects.toMatchObject({ status: 400 });
+    expect((await orderedMessages())[1].tool_calls).toBe(JSON.stringify(stored));
   });
 
   it("resolves approval continuation by updating the assistant turn", async () => {
@@ -154,6 +182,7 @@ describe("chat turn resolution", () => {
       userId: USER_ID,
     });
 
+    turn.claimApproval?.();
     const assistant = await db.query.messages.findFirst({
       where: eq(messages.id, "approval-assistant"),
     });
