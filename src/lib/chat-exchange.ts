@@ -32,6 +32,7 @@ import {
   persistResponseMessage,
 } from "@/lib/chat-turn-persistence";
 import { budgetModelMessages } from "@/lib/context-budget";
+import { tryAcquireConversation } from "@/lib/conversation-admission";
 import { db } from "@/lib/db";
 import { messages } from "@/lib/db/schema";
 import { getEnv } from "@/lib/env";
@@ -59,9 +60,6 @@ const SYSTEM_PROMPT = `TYPO3 MCP operating policy:
 
 Use Web Search when a request depends on current public information, external facts outside the TYPO3 instance, or source-backed answers. Prefer TYPO3 MCP tools over Web Search for facts about the connected TYPO3 site.`;
 
-// shortcut: turn admission is process-local; use shared locking before running multiple app processes.
-const activeConversations = new Set<string>();
-
 export async function streamChatExchange({
   auth,
   conversationId,
@@ -75,16 +73,14 @@ export async function streamChatExchange({
   trigger: ChatTurnTrigger;
   uiMessages: UIMessage[];
 }): Promise<Response> {
-  const conversationKey = `${auth.user.id}:${conversationId}`;
-  if (activeConversations.has(conversationKey)) {
+  const release = tryAcquireConversation(auth.user.id, conversationId);
+  if (!release) {
     return apiError(
       "conversation_busy",
-      "This conversation is generating a response. Wait for it to finish before sending another message.",
+      "This conversation is busy. Wait for the current operation to finish before sending another message.",
       409,
     );
   }
-  activeConversations.add(conversationKey);
-  const release = () => { activeConversations.delete(conversationKey); };
   let streaming = false;
   try {
     const userId = auth.user.id;

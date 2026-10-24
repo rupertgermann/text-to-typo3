@@ -1,5 +1,5 @@
 import { type NextRequest } from "next/server";
-import { badRequest, notFound, withAuth } from "@/lib/api-route";
+import { apiError, badRequest, notFound, withAuth } from "@/lib/api-route";
 import {
   deleteConversationForUser,
   getConversationWithMessagesForUser,
@@ -78,7 +78,10 @@ export const DELETE = withAuth<RouteContext>(async (
   const { id } = await params;
 
   const deleted = await deleteConversationForUser(auth.user.id, id);
-  if (!deleted) {
+  if (deleted === "busy") {
+    return apiError("conversation_busy", "This conversation is busy. Wait for the current operation to finish before deleting it.", 409);
+  }
+  if (deleted === "not_found") {
     return notFound("Conversation not found");
   }
 

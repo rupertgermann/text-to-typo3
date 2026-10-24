@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
+import Database from "better-sqlite3";
 import {
   DELETE,
   GET,
@@ -33,6 +34,7 @@ describe("single conversation routes", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     testDatabase?.cleanup();
     testDatabase = null;
@@ -124,5 +126,30 @@ describe("single conversation routes", () => {
 
     expect(deleteResponse.status).toBe(204);
     expect(remainingMessages).toEqual([]);
+  });
+
+  it.each(["lookup", "mutation"])("releases deletion admission after a %s error", async (failure) => {
+    if (!testDatabase) throw new Error("Expected test database");
+    const sqlite = new Database(testDatabase.databasePath);
+    const error = new Error("Database unavailable");
+    if (failure === "lookup") {
+      vi.spyOn(db.query.conversations, "findFirst").mockImplementationOnce(() => { throw error; });
+    } else {
+      sqlite.exec("CREATE TRIGGER reject_delete BEFORE DELETE ON conversations BEGIN SELECT RAISE(FAIL, 'Database unavailable'); END");
+    }
+    const remove = () => DELETE(
+      new Request("http://localhost/api/conversations/owned", { method: "DELETE" }) as never,
+      { params: Promise.resolve({ id: "owned" }) },
+    );
+
+    try {
+      await expect(remove()).rejects.toThrow("Database unavailable");
+      sqlite.exec("DROP TRIGGER IF EXISTS reject_delete");
+      expect((await remove()).status).toBe(204);
+      expect((await remove()).status).toBe(404);
+      expect((await remove()).status).toBe(404);
+    } finally {
+      sqlite.close();
+    }
   });
 });
