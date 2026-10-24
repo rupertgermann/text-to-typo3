@@ -205,6 +205,8 @@ pnpm db:studio
 - `pnpm db:migrate`: runs Drizzle migrations.
 - `pnpm db:studio`: opens Drizzle Studio for local database inspection.
 
+Database commands load Next.js environment files, including `.env.local`, so `DATABASE_PATH` selects the same database as the app. Exported environment variables take precedence.
+
 ## Core User Flows
 
 ### Authentication
@@ -228,7 +230,8 @@ pnpm db:studio
 - Messages stream in real time.
 - Assistant responses render Markdown with GFM tables and code blocks.
 - User messages support copy, timestamp hover state, edit-and-rerun, and image attachments.
-- Stopping generation preserves the partial response.
+- Stopping generation prevents further TYPO3 writes and model steps. Already-dispatched writes finish recording their completed or unknown outcomes before the conversation becomes available again.
+- Image preparation disables conflicting composer actions until the submission is ready, and a failed image read preserves the draft.
 - Completed TYPO3 writes remain in history if a later model step fails. Retry, Edit, and Regenerate cannot replace turns containing completed writes; send a new message to continue.
 - If a write response is lost, chat saves an unknown outcome and stops further writes in that response. Check the TYPO3 workspace before sending a new write request. Retry, Edit, and Regenerate preserve the uncertain result.
 - Conversation history restores after reload.
@@ -260,6 +263,7 @@ pnpm db:studio
 - Editing and dismissal are disabled while Settings are saving. Reopening the form uses the latest successful save, even while a background refresh is pending.
 - Model provider connection tests stop after 10 seconds, including response-body reading, or when the request is canceled.
 - Context-window information is shown in model cards and persisted for chat budgeting.
+- Saving an unchanged model/provider keeps its known context limit when catalog discovery is unavailable. Changing the selected model or provider clears that limit until a new one is known.
 - The default selected model falls back to `gpt-5.4-mini` when no user preference is stored.
 - New requests use the app's TYPO3 MCP bridge for every model, so uncertain writes can stop further automatic mutations. Saved approvals from the provider's built-in MCP integration can still be approved or denied; each additional hosted call requires approval.
 - LM Studio and custom OpenAI-compatible models use the chat-completions path and the same server-side TYPO3 MCP bridge as the app-managed OpenAI path.

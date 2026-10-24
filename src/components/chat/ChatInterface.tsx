@@ -114,6 +114,8 @@ export function ChatInterface({
   initialMessages,
   typo3BaseUrl,
 }: ChatInterfaceProps) {
+  const submissionPending = useRef(false);
+  const [preparing, setPreparing] = useState(false);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
@@ -173,6 +175,7 @@ export function ChatInterface({
   });
 
   const isLoading = status === "submitted" || status === "streaming";
+  const isBusy = isLoading || preparing;
   const lastTranscriptMessage = messages[messages.length - 1];
   const pendingApprovals = useMemo(
     () => derivePendingApprovals(messages),
@@ -214,6 +217,7 @@ export function ChatInterface({
   }, [messages, status]);
 
   const addFiles = (files: File[]) => {
+    if (submissionPending.current || isLoading) return;
     const imageFiles = files.filter(isImageFile);
     if (imageFiles.length === 0) {
       return;
@@ -224,9 +228,12 @@ export function ChatInterface({
   };
 
   const handleSubmit = async () => {
+    if (submissionPending.current || isLoading) return;
     const text = input.trim();
     if (!text && attachments.length === 0) return;
 
+    submissionPending.current = true;
+    setPreparing(true);
     const currentAttachments = attachments;
     const currentText = input;
     const currentEditingMessageId = editingMessageId;
@@ -243,6 +250,7 @@ export function ChatInterface({
         ),
       );
 
+      setPreparing(false);
       setInput("");
       setAttachments([]);
       setEditingMessageId(null);
@@ -275,10 +283,14 @@ export function ChatInterface({
       setComposerError(
         sendError instanceof Error ? sendError.message : "Failed to send message",
       );
+    } finally {
+      submissionPending.current = false;
+      setPreparing(false);
     }
   };
 
   const startEditing = (message: UIMessage) => {
+    if (submissionPending.current || isLoading) return;
     setEditingMessageId(message.id);
     setInput(extractMessageText(message.parts));
     setAttachments(
@@ -290,7 +302,7 @@ export function ChatInterface({
 
   const retryLastUserMessage = async () => {
     const lastUserMessage = messages.findLast((message) => message.role === "user");
-    if (!lastUserMessage || isLoading) {
+    if (!lastUserMessage || submissionPending.current || isLoading) {
       return;
     }
 
@@ -305,6 +317,7 @@ export function ChatInterface({
   };
 
   const regenerateMessage = async (messageId: string) => {
+    if (submissionPending.current || isLoading) return;
     submittedDraftRef.current = {
       messages, input, attachments, editingMessageId,
     };
@@ -312,6 +325,7 @@ export function ChatInterface({
   };
 
   const toggleAutoApproveWrites = async () => {
+    if (submissionPending.current || isLoading) return;
     const nextValue = !autoApproveWrites;
     setSavingAutoApproveWrites(true);
     setComposerError(null);
@@ -348,6 +362,7 @@ export function ChatInterface({
   };
 
   const selectStarterPrompt = (prompt: string) => {
+    if (submissionPending.current || isLoading) return;
     setEditingMessageId(null);
     setInput(prompt);
     setComposerError(null);
@@ -356,9 +371,10 @@ export function ChatInterface({
 
   const handleToolApprovalResponse = useCallback(
     (approval: { approved: boolean; id: string; reason?: string }) => {
+      if (submissionPending.current || isLoading) return;
       void addToolApprovalResponse(approval);
     },
-    [addToolApprovalResponse],
+    [addToolApprovalResponse, isLoading],
   );
 
   const jumpToPendingApproval = useCallback((toolCallId: string) => {
@@ -371,6 +387,7 @@ export function ChatInterface({
   }, []);
 
   const removeAttachment = (index: number) => {
+    if (submissionPending.current || isLoading) return;
     setAttachments((current) => {
       const next = current.filter((_, currentIndex) => currentIndex !== index);
       return next;
@@ -385,7 +402,7 @@ export function ChatInterface({
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
-    if (isLoading) {
+    if (submissionPending.current || isLoading) {
       return;
     }
 
@@ -395,7 +412,7 @@ export function ChatInterface({
 
   const handleSubmitEvent = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (isLoading) return;
+    if (submissionPending.current || isLoading) return;
     await handleSubmit();
   };
 
@@ -436,7 +453,7 @@ export function ChatInterface({
               variant={autoApproveWrites ? "default" : "outline"}
               className={autoApproveWrites ? "" : "bg-card/80"}
               onClick={() => void toggleAutoApproveWrites()}
-              disabled={savingAutoApproveWrites || isLoading}
+              disabled={savingAutoApproveWrites || isBusy}
             >
               {savingAutoApproveWrites ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -483,7 +500,7 @@ export function ChatInterface({
                       <button
                         key={starterPrompt.id}
                         type="button"
-                        disabled={isLoading}
+                        disabled={isBusy}
                         className="group flex min-h-36 flex-col rounded-lg border border-border bg-card/80 p-4 text-left shadow-sm transition-colors hover:border-primary/50 hover:bg-card focus-visible:border-ring focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
                         onClick={() => selectStarterPrompt(starterPrompt.prompt)}
                       >
@@ -507,9 +524,9 @@ export function ChatInterface({
                 <MessageBubble
                   key={message.id}
                   message={message}
-                  allowEdit={!isLoading}
+                  allowEdit={!isBusy}
                   allowRegenerate={
-                    !isLoading &&
+                    !isBusy &&
                     message.role === "assistant" &&
                     lastTranscriptMessage?.id === message.id
                   }
@@ -521,7 +538,7 @@ export function ChatInterface({
                       ? () => regenerateMessage(message.id)
                       : undefined
                   }
-                  onToolApprovalResponse={handleToolApprovalResponse}
+                  onToolApprovalResponse={isBusy ? undefined : handleToolApprovalResponse}
                   pendingApprovalToolCallIds={pendingApprovalToolCallIds}
                   typo3BaseUrl={typo3BaseUrl}
                 />
@@ -541,7 +558,7 @@ export function ChatInterface({
                           variant="destructive"
                           size="sm"
                           onClick={() => void retryLastUserMessage()}
-                          disabled={isLoading}
+                          disabled={isBusy}
                         >
                           <RefreshCw className="h-3.5 w-3.5" />
                           Retry
@@ -584,6 +601,7 @@ export function ChatInterface({
                 <Button
                   type="button"
                   size="sm"
+                  disabled={isBusy}
                   onClick={() =>
                     handleToolApprovalResponse({
                       id: firstPendingApproval.id,
@@ -598,6 +616,7 @@ export function ChatInterface({
                   size="sm"
                   variant="outline"
                   className="border-amber-700/30 bg-background/80 text-amber-950 hover:bg-background dark:text-amber-100"
+                  disabled={isBusy}
                   onClick={() =>
                     handleToolApprovalResponse({
                       id: firstPendingApproval.id,
@@ -629,7 +648,9 @@ export function ChatInterface({
                     type="button"
                     variant="ghost"
                     size="sm"
+                    disabled={isBusy}
                     onClick={() => {
+                      if (submissionPending.current || isLoading) return;
                       setEditingMessageId(null);
                       setInput("");
                       setAttachments([]);
@@ -659,6 +680,7 @@ export function ChatInterface({
                         variant="ghost"
                         size="icon-xs"
                         onClick={() => removeAttachment(index)}
+                        disabled={isBusy}
                         title="Remove attachment"
                       >
                         <X className="h-3.5 w-3.5" />
@@ -672,6 +694,7 @@ export function ChatInterface({
                 ref={textareaRef}
                 value={input}
                 onChange={(event) => {
+                  if (submissionPending.current || isLoading) return;
                   setInput(event.target.value);
                   setComposerError(null);
                 }}
@@ -680,7 +703,7 @@ export function ChatInterface({
                     ? "Edit your previous message..."
                     : "Message your TYPO3 assistant..."
                 }
-                disabled={isLoading}
+                disabled={isBusy}
                 rows={2}
                 className="min-h-20 w-full resize-none rounded-xl border border-input bg-transparent px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
                 onKeyDown={(event) => {
@@ -695,6 +718,7 @@ export function ChatInterface({
                 <div className="flex items-center gap-2">
                   <input
                     ref={fileInputRef}
+                    disabled={isBusy}
                     type="file"
                     accept="image/*"
                     multiple
@@ -706,7 +730,7 @@ export function ChatInterface({
                     variant="outline"
                     size="sm"
                     onClick={() => fileInputRef.current?.click()}
-                    disabled={isLoading}
+                    disabled={isBusy}
                     title="Attach images"
                   >
                     <Paperclip className="h-4 w-4" />
@@ -733,7 +757,7 @@ export function ChatInterface({
                     <Button
                       type="submit"
                       size="icon"
-                      disabled={!input.trim() && attachments.length === 0}
+                      disabled={isBusy || (!input.trim() && attachments.length === 0)}
                       title={
                         editingMessageId ? "Update message" : "Send message"
                       }

@@ -81,7 +81,7 @@ class McpRpcError extends Error {
 }
 
 // One exchange owns this queue, so cached tools never share recovery state.
-export function createMcpExecution() {
+export function createMcpExecution(signal?: AbortSignal) {
   let uncertain = false;
   let queue = Promise.resolve();
   return {
@@ -94,12 +94,16 @@ export function createMcpExecution() {
           ...definition,
           execute: (input, options) => {
             const result = queue.then(async () => {
+              if (signal?.aborted) return stoppedWriteResult();
               if (uncertain) return {
                 isError: true,
                 content: [{ type: "text", text: "Not executed because an earlier TYPO3 write outcome is unknown." }],
                 _meta: { operation: "write", outcome: "blocked" },
               };
-              const output = await execute(input, options);
+              const output = await execute(input, signal ? {
+                ...options,
+                abortSignal: options.abortSignal ? AbortSignal.any([signal, options.abortSignal]) : signal,
+              } : options);
               uncertain ||= hasUnknownWriteOutcome(output);
               return output;
             });
@@ -109,6 +113,14 @@ export function createMcpExecution() {
         } satisfies ToolSet[string]];
       }),
     ),
+  };
+}
+
+function stoppedWriteResult() {
+  return {
+    isError: true,
+    content: [{ type: "text", text: "Not executed because generation was stopped." }],
+    _meta: { operation: "write", outcome: "blocked" },
   };
 }
 
@@ -523,7 +535,7 @@ export async function getMcpTools({
               additionalProperties: true,
             },
           ),
-          execute: async (input) => {
+          execute: async (input, { abortSignal }) => {
             let executeMcpSession = getCachedMcpSession(sessionId);
 
             if (!executeMcpSession && activeMcpSessionId) {
@@ -537,6 +549,8 @@ export async function getMcpTools({
                 setCachedMcpSession(sessionId, executeMcpSession);
               }
             }
+
+            if (operation === "write" && abortSignal?.aborted) return stoppedWriteResult();
 
             let result: McpMethodResponse<McpToolResult>;
             try {

@@ -296,6 +296,20 @@ export async function getResolvedUserSettings(
   };
 }
 
+function modelContextIdentity(settings: Pick<UserSettings,
+  "model_id" | "lmstudio_base_url" | "lmstudio_model_id" | "custom_providers"
+>): string {
+  const provider = parseStoredCustomProviders(settings.custom_providers).find(
+    ({ id }) => settings.model_id?.startsWith(`custom:${id}:`),
+  );
+  const endpoint = provider
+    ? ["custom", provider.baseUrl, provider.apiKey ? decrypt(provider.apiKey) : null]
+    : settings.lmstudio_base_url && settings.model_id === settings.lmstudio_model_id
+      ? ["lmstudio", settings.lmstudio_base_url]
+      : ["openai"];
+  return JSON.stringify([settings.model_id, endpoint]);
+}
+
 export async function upsertUserSettings(
   userId: string,
   input: UserSettingsInput,
@@ -315,10 +329,6 @@ export async function upsertUserSettings(
       input.modelId === undefined
         ? existing?.model_id ?? null
         : normalizeNullableString(input.modelId);
-    const nextModelContextWindow =
-      input.modelContextWindow === undefined
-        ? existing?.model_context_window ?? null
-        : normalizeContextWindow(input.modelContextWindow);
     const nextLmStudioBaseUrl =
       input.lmstudioBaseUrl === undefined
         ? existing?.lmstudio_base_url ?? null
@@ -341,12 +351,18 @@ export async function upsertUserSettings(
     const nextRow = {
       user_id: userId,
       model_id: nextModelId,
-      model_context_window: nextModelContextWindow,
+      model_context_window: existing?.model_context_window ?? null,
       openai_api_key: nextOpenAiApiKey,
-      lmstudio_base_url: nextLmStudioBaseUrl,
+      lmstudio_base_url: nextLmStudioBaseUrl ?? null,
       lmstudio_model_id: nextLmStudioModelId,
       custom_providers: JSON.stringify(nextCustomProviders),
     };
+    const nextModelContextWindow = input.modelContextWindow !== undefined
+      ? normalizeContextWindow(input.modelContextWindow)
+      : existing && modelContextIdentity(existing) === modelContextIdentity(nextRow)
+        ? existing.model_context_window
+        : null;
+    nextRow.model_context_window = nextModelContextWindow;
 
     tx.insert(userSettings)
       .values(nextRow)

@@ -64,12 +64,14 @@ export async function streamChatExchange({
   auth,
   conversationId,
   messageId,
+  signal,
   trigger,
   uiMessages,
 }: {
   auth: AuthenticatedUserContext;
   conversationId: string;
   messageId?: string;
+  signal?: AbortSignal;
   trigger: ChatTurnTrigger;
   uiMessages: UIMessage[];
 }): Promise<Response> {
@@ -127,7 +129,7 @@ export async function streamChatExchange({
     const maxSteps = getAgentLoopMaxSteps();
     const requireWriteApproval = !Boolean(turn.conversation.auto_approve_writes);
 
-    const execution = createMcpExecution();
+    const execution = createMcpExecution(signal);
     const nativeApprovalNames = turn.nativeApprovalNames;
     const nativeContinuation = nativeApprovalNames.length > 0;
     let nativeReadToolNames: string[] = [];
@@ -162,6 +164,8 @@ export async function streamChatExchange({
     }
 
     if (!nativeContinuation) tools = addWebSearchTool({ providerResolution, tools });
+
+    if (signal?.aborted) return new Response(null, { status: 204 });
 
     try {
       turn.claimApproval?.();
@@ -208,12 +212,15 @@ export async function streamChatExchange({
             part.state === "approval-responded" && part.approval.approved,
         )
       : [];
+    if (signal?.aborted) return new Response(null, { status: 204 });
+
+    // Stop new work without aborting the SDK stream that records dispatched writes.
     const result = streamText({
       model: providerResolution.model,
       maxRetries: 0,
       system: [SYSTEM_PROMPT, env.TYPO3_MCP_SYSTEM_PROMPT].filter(Boolean).join("\n\n"),
       messages: budgetedModelMessages,
-      stopWhen: [stepCountIs(nativeContinuation ? 1 : maxSteps), () => execution.hasUnknownOutcome()],
+      stopWhen: [stepCountIs(nativeContinuation ? 1 : maxSteps), () => Boolean(signal?.aborted) || execution.hasUnknownOutcome()],
       tools,
       experimental_transform: () => new TransformStream({
         transform(chunk, controller) {
@@ -227,14 +234,16 @@ export async function streamChatExchange({
           }
         },
       }),
-      prepareStep: ({ stepNumber, steps }) =>
-        getAgentLoopStepOptions({
+      prepareStep: ({ stepNumber, steps }) => {
+        signal?.throwIfAborted();
+        return getAgentLoopStepOptions({
           isChatCompletionsPath: providerResolution.isChatCompletionsPath,
           userText: turn.userText,
           stepNumber,
           maxSteps,
           steps,
-        }),
+        });
+      },
     });
 
     let streamFailed = false;
@@ -274,7 +283,7 @@ export async function streamChatExchange({
         }
       },
       onFinish: async ({ responseMessage, isAborted }) => {
-        const failed = streamFailed || isAborted || responseMessage.parts.some(
+        const failed = streamFailed || isAborted || signal?.aborted || responseMessage.parts.some(
           (part) => isToolUIPart(part) && part.state === "output-available" && hasUnknownWriteOutcome(part.output),
         );
         const tokenUsage = failed

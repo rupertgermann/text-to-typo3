@@ -1,4 +1,7 @@
 import { defineConfig } from "drizzle-kit";
+import { loadEnvConfig } from "@next/env";
+
+loadEnvConfig(process.cwd(), process.env.NODE_ENV === "development");
 
 export default defineConfig({
   schema: "./src/lib/db/schema.ts",

@@ -51,6 +51,177 @@ describe("chat route integration", () => {
     testDatabase = null;
   });
 
+  it("does not dispatch a write or another model step after SDK Stop", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [
+      createToolCallResponse({ toolCallId: "after-stop", toolName: "WriteTable", argumentsJson: JSON.stringify({ action: "create", table: "pages", data: { title: "After stop" } }) }),
+      createTextResponse({ text: "Created after stop" }),
+    ] });
+    await seedTokenModeConversation({ conversationId: "stop-audit", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Stopped", autoApproveWrites: true });
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith(fakeModel!.url) && String(input).endsWith("/chat/completions")) {
+        entered.resolve();
+        await resume.promise;
+      }
+      return realFetch(input, init);
+    });
+    const chat = new Chat({ transport: stoppableTransport("stop-audit") });
+    const sending = chat.sendMessage({ text: "Create a page" });
+    await entered.promise;
+    try {
+      await chat.stop();
+      expect(fakeMcp.toolCalls).toHaveLength(0);
+      await vi.waitFor(() => expect(chat.status).toBe("ready"));
+    } finally {
+      resume.resolve();
+    }
+    await sending;
+    await vi.waitFor(async () => expect(await latestAssistantMessage("stop-audit")).not.toBeNull());
+    expect(fakeMcp.toolCalls).toHaveLength(0);
+    expect(fakeModel.chatRequests).toHaveLength(1);
+    expect((await latestAssistantMessage("stop-audit"))?.tool_calls).toContain("Not executed because generation was stopped");
+  });
+
+  it.each(["new", "edit", "regenerate"])("retains an in-flight write and blocks queued writes after Stop during %s", async (kind) => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [
+      { chunks: [
+        { choices: [{ index: 0, delta: { role: "assistant", tool_calls: ["sent", "queued"].map((id, index) => ({
+          index, id, type: "function", function: { name: "WriteTable", arguments: JSON.stringify({ action: "create", table: "pages" }) },
+        })) }, finish_reason: null }] },
+        { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+      ] },
+      createTextResponse({ text: "New turn" }),
+    ] });
+    await seedTokenModeConversation({ conversationId: "stop-flight", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Stop", autoApproveWrites: true });
+    if (kind !== "new") await db.insert(messages).values([
+      { id: "stop-user", conversation_id: "stop-flight", role: "user", content: "Original question", created_at: 1 },
+      { id: "stop-answer", conversation_id: "stop-flight", role: "assistant", content: "Original answer", created_at: 2 },
+    ]);
+    const before = await persistedUiMessages("stop-flight");
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    const persisting = deferred<void>();
+    const save = deferred<void>();
+    const persist = chatPersistence.persistResponseMessage;
+    vi.spyOn(chatPersistence, "persistResponseMessage").mockImplementationOnce(async (input) => {
+      persisting.resolve();
+      await save.promise;
+      return persist(input);
+    });
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await realFetch(input, init);
+      if (String(input).startsWith(fakeMcp!.url) && String(init?.body).includes('"tools/call"')) {
+        entered.resolve();
+        await resume.promise;
+        if (kind === "regenerate") {
+          await response.text();
+          throw new TypeError("Response lost after commit");
+        }
+      }
+      return response;
+    });
+    const chat = new Chat({ transport: stoppableTransport("stop-flight"), messages: before });
+    const sending = kind === "regenerate"
+      ? chat.regenerate({ messageId: "stop-answer" })
+      : chat.sendMessage({ ...(kind === "edit" ? { messageId: "stop-user" } : {}), text: "Create pages" });
+    await entered.promise;
+    try {
+      await chat.stop();
+      await sending;
+      expect(chat.status).toBe("ready");
+      expect(fakeMcp.toolCalls).toHaveLength(1);
+      expect((await postChat({ conversationId: "stop-flight", text: "Too early" })).status).toBe(409);
+      expect((await deleteChat("stop-flight")).status).toBe(409);
+      resume.resolve();
+      await persisting.promise;
+      expect((await postChat({ conversationId: "stop-flight", text: "Still saving" })).status).toBe(409);
+      expect((await deleteChat("stop-flight")).status).toBe(409);
+    } finally {
+      resume.resolve();
+      save.resolve();
+    }
+    await vi.waitFor(async () => expect((await latestAssistantMessage("stop-flight"))?.tool_calls).toContain('"toolCallId":"sent"'));
+    const saved = await persistedUiMessages("stop-flight");
+    expect(saved.slice(0, before.length)).toEqual(before);
+    expect(saved.at(-1)?.parts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ toolCallId: "sent", state: "output-available", output: expect.objectContaining(kind === "regenerate" ? { _meta: { operation: "write", outcome: "unknown" } } : { uid: 123 }) }),
+      expect.objectContaining({ toolCallId: "queued", state: "output-available", output: expect.objectContaining({ _meta: { operation: "write", outcome: "blocked" } }) }),
+    ]));
+    expect(fakeMcp.toolCalls).toHaveLength(1);
+    expect(fakeModel.chatRequests).toHaveLength(1);
+    const later = await vi.waitFor(async () => {
+      const response = await postChat({ conversationId: "stop-flight", text: "New turn" });
+      expect(response.status).toBe(200);
+      return response;
+    });
+    await later.text();
+    expect((await latestAssistantMessage("stop-flight"))?.content).toBe("New turn");
+    expect((await deleteChat("stop-flight")).status).toBe(204);
+  });
+
+  it.each(["edit", "regenerate"])("preserves original history when Stop interrupts a text-only %s", async (kind) => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [createTextResponse({ text: "Canceled replacement" })] });
+    await seedTokenModeConversation({ conversationId: "stop-history", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Stop" });
+    await db.insert(messages).values([
+      { id: "original-user", conversation_id: "stop-history", role: "user", content: "Original question", created_at: 1 },
+      { id: "original-answer", conversation_id: "stop-history", role: "assistant", content: "Original answer", created_at: 2 },
+    ]);
+    const before = await persistedUiMessages("stop-history");
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/chat/completions")) {
+        entered.resolve();
+        await resume.promise;
+      }
+      return realFetch(input, init);
+    });
+    const chat = new Chat({ transport: stoppableTransport("stop-history"), messages: before });
+    const sending = kind === "edit"
+      ? chat.sendMessage({ messageId: "original-user", text: "Changed question" })
+      : chat.regenerate({ messageId: "original-answer" });
+    await entered.promise;
+    try {
+      await chat.stop();
+    } finally {
+      resume.resolve();
+    }
+    await sending;
+    await vi.waitFor(async () => expect((await latestAssistantMessage("stop-history"))?.content).toBe("Canceled replacement"));
+    expect((await persistedUiMessages("stop-history")).slice(0, 2)).toEqual(before);
+    expect(fakeMcp.toolCalls).toHaveLength(0);
+  });
+
+  it("does not start the model when Stop occurs during tool discovery", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [] });
+    await seedTokenModeConversation({ conversationId: "stop-setup", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Stop" });
+    const controller = new AbortController();
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await realFetch(input, init);
+      if (String(init?.body).includes('"tools/list"')) controller.abort();
+      return response;
+    });
+    const response = await POST(new Request("http://localhost/api/chat", {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversationId: "stop-setup", messages: [{ id: "setup-user", role: "user", parts: [{ type: "text", text: "Create a page" }] }] }),
+    }) as never);
+    expect(response.status).toBe(204);
+    expect(fakeModel.chatRequests).toHaveLength(0);
+    expect(fakeMcp.toolCalls).toHaveLength(0);
+    expect((await deleteChat("stop-setup")).status).toBe(204);
+  });
+
   it.each([false, true])("rejects deletion during generation and preserves the write result when response is lost=%s", async (lostResponse) => {
     fakeMcp = await startFakeMcpServer();
     fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [
@@ -1543,4 +1714,19 @@ async function deleteChat(conversationId: string) {
     new Request(`http://localhost/api/conversations/${conversationId}`, { method: "DELETE" }) as never,
     { params: Promise.resolve({ id: conversationId }) },
   );
+}
+
+function stoppableTransport(conversationId: string) {
+  return new DefaultChatTransport({
+    api: "http://localhost/api/chat",
+    body: { conversationId },
+    fetch: async (input, init) => {
+      const response = await POST(new Request(String(input), init) as never);
+      // Browser fetch aborts response reading independently of the server's drain.
+      return new Response(response.body?.pipeThrough(new TransformStream(), { signal: init?.signal ?? undefined }), {
+        status: response.status,
+        headers: response.headers,
+      });
+    },
+  });
 }

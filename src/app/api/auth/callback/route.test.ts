@@ -6,6 +6,7 @@ import { stubTokenAuthEnv } from "@/test/auth";
 import { users, sessions } from "@/lib/db/schema";
 import { createServer } from "node:http";
 import { deferred } from "@/test/deferred";
+import { getValidAccessToken } from "@/lib/auth";
 const saved = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/session", () => ({ getSession: async () => ({ save: saved }) }));
 vi.mock("next/headers", () => ({ cookies: async () => ({
@@ -42,6 +43,21 @@ it("rejects a mismatched state before contacting OAuth", async () => {
   const response = await GET(new NextRequest("http://localhost/api/auth/callback?code=code&state=wrong"));
   expect(response.headers.get("location")).toContain("error=invalid_state");
   expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it("authenticates the short-lived nonrefreshable token accepted by the callback", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+    String(input).endsWith("/oauth/token")
+      ? Response.json({ access_token: "short-lived-access", expires_in: 30 })
+      : Response.json({ sub: "42", name: "Editor" })));
+
+  const response = await GET(new NextRequest("http://localhost/api/auth/callback?code=code&state=state"));
+  const session = await db.query.sessions.findFirst();
+
+  expect(response.status).toBe(307);
+  expect(session?.refresh_token).toBeNull();
+  expect(session).toBeDefined();
+  expect(await getValidAccessToken(session!.id)).toBe("short-lived-access");
 });
 
 it.each([

@@ -27,7 +27,15 @@ vi.mock("react", async (importOriginal) => ({
     }];
   },
   useMemo: <T>(factory: () => T) => factory(),
-  useCallback: <T>(callback: T) => callback,
+  useCallback<T>(callback: T, deps: DependencyList) {
+    const index = hooks.cursor++;
+    const previous = hooks.states[index] as { callback: T; deps: DependencyList } | undefined;
+    if (!previous || deps.some((dep, i) => !Object.is(dep, previous.deps[i]))) {
+      hooks.states[index] = { callback, deps };
+      return callback;
+    }
+    return previous.callback;
+  },
   useRef<T>(initial: T) {
     const index = hooks.cursor++;
     if (!(index in hooks.states)) hooks.states[index] = { current: initial };
@@ -302,4 +310,95 @@ it("freezes editing and Close/Escape dismissal during a save and restores the dr
   expect(findKeyInput(tree)?.value).toBe("unsaved-key");
   tree.props.onOpenChange(false);
   expect(modal().props.open).toBe(false);
+});
+
+function catalogResponse(id: string) {
+  const model = { id, name: id, provider: "lmstudio", contextWindow: 10000 };
+  const provider = { provider: "lmstudio", providerId: "lmstudio", displayName: "LM Studio", status: "available", models: [model] };
+  const catalog = { models: [model], providers: [provider], customProviders: [], hasOpenAIKey: false, lmstudioBaseUrl: null, selectedModelId: null };
+  return new Response(JSON.stringify({ type: "provider", provider }) + "\n" + JSON.stringify({ type: "done", catalog }) + "\n");
+}
+
+it.each(["catalog", "error"])("ignores an obsolete automatic catalog %s while a manual request owns loading", async (outcome) => {
+  const automatic = deferred<Response>();
+  const manual = deferred<Response>();
+  fetchMock.mockImplementation(async (url) => {
+    if (url === "/api/settings") return Response.json(saved);
+    return String(url).includes("lmstudioBaseUrl=") ? manual.promise : automatic.promise;
+  });
+  draw();
+  let form = await settle();
+  form.setLmstudioBaseUrl("http://new-endpoint.local/v1");
+  form = draw();
+  const manualLoad = form.refreshModels("http://new-endpoint.local/v1");
+  if (outcome === "catalog") automatic.resolve(catalogResponse("old-model"));
+  else automatic.reject(new Error("Obsolete failure"));
+  form = await settle();
+  expect(form.modelsLoading).toBe(true);
+  expect(form.error).toBeNull();
+  expect(form.lmStudioModels).toEqual([]);
+  manual.resolve(catalogResponse("new-model"));
+  await manualLoad;
+  form = await settle();
+  expect(form.lmStudioModels.map((model) => model.id)).toEqual(["new-model"]);
+  expect(form.lmstudioBaseUrl).toBe("http://new-endpoint.local/v1");
+  expect(form.modelsLoading).toBe(false);
+});
+
+it("keeps the newer catalog when the old automatic response arrives last", async () => {
+  const automatic = deferred<Response>();
+  fetchMock.mockImplementation(async (url) => {
+    if (url === "/api/settings") return Response.json(saved);
+    return String(url).includes("lmstudioBaseUrl=") ? catalogResponse("new-model") : automatic.promise;
+  });
+  draw();
+  await draw().refreshModels("http://new.local/v1");
+  automatic.resolve(catalogResponse("old-model"));
+  const form = await settle();
+  expect(form.lmStudioModels.map((model) => model.id)).toEqual(["new-model"]);
+  expect(form.modelsLoading).toBe(false);
+});
+
+it("invalidates a manual request on close before reopening", async () => {
+  const manual = deferred<Response>();
+  fetchMock.mockImplementation(async (url) => {
+    if (url === "/api/settings") return Response.json(saved);
+    return String(url).includes("lmstudioBaseUrl=") ? manual.promise : catalogResponse("saved-model");
+  });
+  draw();
+  await settle();
+  const pending = draw().refreshModels("http://other.local/v1");
+  const signal = fetchMock.mock.calls.find(([url]) => String(url).includes("lmstudioBaseUrl="))?.[1]?.signal;
+  opened = false; draw();
+  expect(signal?.aborted).toBe(true);
+  opened = true; draw();
+  await settle();
+  manual.resolve(catalogResponse("obsolete-model"));
+  await pending;
+  expect((await settle()).lmStudioModels.map((model) => model.id)).toEqual(["saved-model"]);
+});
+
+it("publishes current incremental providers and allows retry after a current failure", async () => {
+  let streamController!: ReadableStreamDefaultController<Uint8Array>;
+  fetchMock.mockImplementation(async (url) => {
+    if (url === "/api/settings") return Response.json(saved);
+    return new Response(new ReadableStream<Uint8Array>({ start(controller) { streamController = controller; } }));
+  });
+  draw();
+  await settle();
+  const provider = { provider: "lmstudio", providerId: "lmstudio", displayName: "LM Studio", status: "available", models: [{ id: "incremental", name: "Incremental", provider: "lmstudio", contextWindow: 10000 }] };
+  streamController.enqueue(new TextEncoder().encode(JSON.stringify({ type: "provider", provider }) + "\n"));
+  let form = await settle();
+  expect(form.lmStudioModels.map((model) => model.id)).toEqual(["incremental"]);
+  expect(form.modelsLoading).toBe(true);
+  streamController.error(new Error("Connection lost"));
+  form = await settle();
+  expect(form.error).toBe("Connection lost");
+  expect(form.modelsLoading).toBe(false);
+  fetchMock.mockResolvedValue(catalogResponse("retried-model"));
+  await form.refreshModels();
+  form = await settle();
+  expect(form.error).toBeNull();
+  expect(form.modelsLoading).toBe(false);
+  expect(form.lmStudioModels.map((model) => model.id)).toEqual(["retried-model"]);
 });

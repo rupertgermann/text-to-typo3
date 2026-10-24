@@ -37,6 +37,24 @@ describe("authentication concurrency", () => {
     });
   }
 
+  it.each([30, 0, -1])("uses a nonrefreshable access token only before its actual expiry (%s seconds left)", async (remaining) => {
+    await seedLocalTokenUser();
+    vi.stubEnv("TYPO3_MCP_ACCESS_TOKEN", "");
+    await db.insert(sessions).values({
+      id: "rotating-session", user_id: LOCAL_TOKEN_USER_ID,
+      access_token: encrypt("short-lived-access"),
+      expires_at: Math.floor(Date.now() / 1000) + remaining,
+    });
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    const handler = withAuth(async (_request, auth) => Response.json({ token: auth.accessToken }));
+    const response = await handler(new NextRequest("http://localhost/api/protected"));
+
+    expect(response.status).toBe(remaining > 0 ? 200 : 401);
+    if (remaining > 0) expect(await response.json()).toEqual({ token: "short-lived-access" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("authenticates concurrent requests with one rotating refresh and reuses the persisted token", async () => {
     await seedLocalTokenUser();
     await seedExpiredSession();

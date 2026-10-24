@@ -25,6 +25,7 @@ describe("settings route", () => {
   afterEach(async () => {
     await fakeModel?.close();
     fakeModel = null;
+    vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     testDatabase?.cleanup();
     testDatabase = null;
@@ -165,6 +166,70 @@ describe("settings route", () => {
     expect(stored?.openai_api_key).toBeTruthy();
     expect(stored?.openai_api_key).not.toBe("sk-test-secret");
     expect(stored?.model_context_window).toBe(400000);
+  });
+
+  it.each(["custom", "lmstudio"])("retains known capacity when an unchanged %s catalog is unavailable", async (kind) => {
+    await seedLocalTokenUser();
+    const selection = kind === "custom"
+      ? { modelId: "custom:saved:local-chat", customProviders: [{ id: "saved", displayName: "Saved", baseUrl: "http://provider.invalid/v1" }] }
+      : { modelId: "local-chat", lmstudioModelId: "local-chat", lmstudioBaseUrl: "http://provider.invalid/v1" };
+    await upsertUserSettings("local-token-user", { ...selection, modelContextWindow: 131072 });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: "Unavailable" }, { status: 503 })));
+
+    const response = await patch(selection);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ modelContextWindow: 131072 });
+    expect(await getResolvedUserSettings("local-token-user")).toMatchObject({ modelContextWindow: 131072 });
+  });
+
+  it.each([
+    { modelId: "custom:saved:other-model" },
+    { customProviders: [{ id: "saved", displayName: "Saved", baseUrl: "http://other.invalid/v1" }] },
+    { modelId: "local-chat", lmstudioModelId: "local-chat", lmstudioBaseUrl: "http://local.invalid/v1" },
+  ])("clears old capacity when the selected model or provider changes without discovery ($modelId)", async (change) => {
+    await seedLocalTokenUser();
+    await upsertUserSettings("local-token-user", {
+      modelId: "custom:saved:local-chat", modelContextWindow: 131072,
+      customProviders: [{ id: "saved", displayName: "Saved", baseUrl: "http://provider.invalid/v1" }],
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: "Unavailable" }, { status: 503 })));
+
+    const response = await patch(change);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ modelContextWindow: null });
+  });
+
+  it("retains capacity through unrelated provider edits and refreshes it after recovery", async () => {
+    await seedLocalTokenUser();
+    const selected = { id: "saved", displayName: "Saved", baseUrl: "http://provider.invalid/v1", apiKey: "same-provider-key" };
+    const other = { id: "other", displayName: "Other", baseUrl: "http://other.invalid/v1" };
+    await upsertUserSettings("local-token-user", {
+      modelId: "custom:saved:local-chat", modelContextWindow: 131072,
+      customProviders: [selected, other],
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: "Unavailable" }, { status: 503 })));
+    const response = await patch({ customProviders: [{ ...other, displayName: "Renamed" }, selected] });
+    expect(await response.json()).toMatchObject({ modelContextWindow: 131072 });
+
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: [{ id: "local-chat", context_length: 262144 }] })));
+    const recovered = await patch({ modelId: "custom:saved:local-chat" });
+    expect(await recovered.json()).toMatchObject({ modelContextWindow: 262144 });
+  });
+
+  it("clears a local model's old capacity atomically before discovering a changed endpoint", async () => {
+    await seedLocalTokenUser();
+    await upsertUserSettings("local-token-user", {
+      modelId: "local-chat", lmstudioModelId: "local-chat",
+      lmstudioBaseUrl: "http://first.invalid/v1", modelContextWindow: 131072,
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      expect(await getResolvedUserSettings("local-token-user")).toMatchObject({ modelContextWindow: null });
+      return Response.json({ error: "Unavailable" }, { status: 503 });
+    }));
+    const response = await patch({ lmstudioBaseUrl: "http://second.invalid/v1" });
+    expect(await response.json()).toMatchObject({ modelContextWindow: null });
   });
 
   it("captures local model context windows when settings are saved", async () => {
