@@ -142,6 +142,7 @@ export function useSettingsForm({
   const [modelsLoading, setModelsLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const savePending = useRef(false);
+  const catalogRequest = useRef<AbortController | null>(null);
   const [draftInitialized, setDraftInitialized] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [catalogState, setCatalogState] = useState<{
@@ -208,7 +209,9 @@ export function useSettingsForm({
   }, [draftInitialized, open, settings]);
 
   const loadModels = useCallback(async (options?: { lmstudioBaseUrl?: string }) => {
+    catalogRequest.current?.abort();
     const controller = new AbortController();
+    catalogRequest.current = controller;
     setModelsLoading(true);
     setError(null);
     setCatalogState({ models: [], providerCatalogs: [] });
@@ -218,6 +221,7 @@ export function useSettingsForm({
         lmstudioBaseUrl: options?.lmstudioBaseUrl,
         signal: controller.signal,
         onProvider: (provider) => {
+          if (catalogRequest.current !== controller) return;
           setCatalogState((current) => {
             const nextProviders = applyProviderCatalog(
               current.providerCatalogs,
@@ -230,6 +234,7 @@ export function useSettingsForm({
           });
         },
         onDone: (catalog) => {
+          if (catalogRequest.current !== controller) return;
           setCatalogState({
             models: catalog.models,
             providerCatalogs: catalog.providers,
@@ -237,6 +242,7 @@ export function useSettingsForm({
         },
       });
     } catch (loadError) {
+      if (catalogRequest.current !== controller) return;
       if (loadError instanceof Error && loadError.name === "AbortError") {
         return;
       }
@@ -244,7 +250,7 @@ export function useSettingsForm({
         loadError instanceof Error ? loadError.message : "Failed to fetch models",
       );
     } finally {
-      setModelsLoading(false);
+      if (catalogRequest.current === controller) setModelsLoading(false);
     }
 
   }, []);
@@ -254,48 +260,13 @@ export function useSettingsForm({
       return;
     }
 
-    const controller = new AbortController();
-    setModelsLoading(true);
-    setError(null);
-    setCatalogState({ models: [], providerCatalogs: [] });
+    void loadModels();
 
-    void readModelCatalogStream({
-      signal: controller.signal,
-      onProvider: (provider) => {
-        setCatalogState((current) => {
-          const nextProviders = applyProviderCatalog(
-            current.providerCatalogs,
-            provider,
-          );
-          return {
-            models: modelsFromProviders(nextProviders),
-            providerCatalogs: nextProviders,
-          };
-        });
-      },
-      onDone: (catalog) => {
-        setCatalogState({
-          models: catalog.models,
-          providerCatalogs: catalog.providers,
-        });
-      },
-    })
-      .catch((loadError) => {
-        if (loadError instanceof Error && loadError.name === "AbortError") {
-          return;
-        }
-        setError(
-          loadError instanceof Error
-            ? loadError.message
-            : "Failed to fetch models",
-        );
-      })
-      .finally(() => {
-        setModelsLoading(false);
-      });
-
-    return () => controller.abort();
-  }, [open]);
+    return () => {
+      catalogRequest.current?.abort();
+      catalogRequest.current = null;
+    };
+  }, [open, loadModels]);
 
   const openAiModels = useMemo(
     () => catalogState.models.filter((model) => model.provider === "openai"),

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { isValidElement, type ReactNode, type SetStateAction } from "react";
 import { Chat } from "@ai-sdk/react";
 import type { ChatTransport, UIMessage } from "ai";
+import { MessageBubble } from "./MessageBubble";
 import { ChatInterface } from "./ChatInterface";
 
 const hooks = vi.hoisted(() => ({ states: [] as unknown[], cursor: 0, chat: null as Chat<UIMessage> | null, onError: undefined as ((error: Error) => void) | undefined, initialError: undefined as Error | undefined }));
@@ -38,6 +39,10 @@ type TestProps = {
   message?: UIMessage;
   title?: string;
   value?: string;
+  disabled?: boolean;
+  allowEdit?: boolean;
+  allowRegenerate?: boolean;
+  onKeyDown?: (event: { key: string; shiftKey: boolean; preventDefault(): void }) => void;
   onEdit?: () => void;
   onRegenerate?: () => Promise<void>;
   onClick?: () => void;
@@ -145,4 +150,85 @@ it("restores a busy submission to the composer so Send submits a fresh user mess
   expect(requests[1].messageId).toBeUndefined();
   expect(hooks.chat.messages).toHaveLength(1);
   expect(hooks.chat.messages[0].parts).toEqual([{ type: "text", text: "New question" }]);
+});
+
+it.each(["completed_tool_results", "conversation_busy"])("preserves a current text and image draft when Regenerate receives %s", async (code) => {
+  const history: UIMessage[] = [
+    { id: "user", role: "user", parts: [{ type: "text", text: "Create a page" }] },
+    { id: "assistant", role: "assistant", parts: [{ type: "text", text: "Done" }] },
+  ];
+  hooks.chat = new Chat<UIMessage>({ messages: history, onError: (error) => hooks.onError?.(error), transport: {
+    sendMessages: async () => { throw new Error(JSON.stringify({ error: { code } })); },
+    reconnectToStream: async () => null,
+  } });
+  const initialBubble = draw().find((node) => node.props.message?.id === "assistant")!;
+  draw().find((node) => node.props.message?.id === "user")!.props.onEdit!();
+  draw().find((node) => node.type === "textarea")!.props.onChange!({ target: { value: "Keep this draft" } });
+  draw().find((node) => node.props.onDrop)!.props.onDrop!({ preventDefault() {}, dataTransfer: { files: [new File(["draft"], "draft.png", { type: "image/png" })] } });
+  const nextBubble = draw().find((node) => node.props.message?.id === "assistant")!;
+  // React uses shallow prop comparison when memo has no custom comparator.
+  const memo = MessageBubble as unknown as { compare: null | ((a: unknown, b: unknown) => boolean) };
+  const equal = memo.compare ? memo.compare(initialBubble.props, nextBubble.props)
+    : Object.keys(nextBubble.props).every((key) => Object.is(Reflect.get(initialBubble.props, key), Reflect.get(nextBubble.props, key)));
+  expect(equal).toBe(false);
+  await (equal ? initialBubble : nextBubble).props.onRegenerate!();
+  expect(hooks.chat.messages).toEqual(history);
+  const tree = draw();
+  expect(tree.find((node) => node.type === "textarea")!.props.value).toBe("Keep this draft");
+  expect(tree.some((node) => node.props.children === "draft.png")).toBe(true);
+  expect(tree.some((node) => node.props.children === "Editing a previous message")).toBe(code === "conversation_busy");
+});
+
+it.each([false, true])("freezes image preparation and releases the guard after read failure=%s", async (fails) => {
+  let reader: { onload?: () => void; onerror?: () => void } | undefined;
+  const read = vi.fn();
+  vi.stubGlobal("FileReader", class {
+    result = "data:image/png;base64,bmV3";
+    onload?: () => void;
+    onerror?: () => void;
+    readAsDataURL() { read(); reader = { onload: () => this.onload?.(), onerror: () => this.onerror?.() }; }
+  });
+  const requests: Parameters<ChatTransport<UIMessage>["sendMessages"]>[0][] = [];
+  hooks.chat = new Chat<UIMessage>({ messages: [{ id: "user", role: "user", parts: [{ type: "text", text: "Original" }] }, { id: "assistant", role: "assistant", parts: [{ type: "text", text: "Response" }] }], transport: {
+    sendMessages: async (request) => { requests.push(request); return new ReadableStream({ start(controller) { controller.close(); } }); },
+    reconnectToStream: async () => null,
+  } });
+  draw().find((node) => node.props.message?.id === "user")!.props.onEdit!();
+  draw().find((node) => node.type === "textarea")!.props.onChange!({ target: { value: "Send this image" } });
+  draw().find((node) => node.props.onDrop)!.props.onDrop!({ preventDefault() {}, dataTransfer: { files: [new File(["new"], "new.png", { type: "image/png" })] } });
+  const before = draw();
+  const submit = before.find((node) => node.type === "form")!.props.onSubmit!;
+  const pending = submit({ preventDefault() {} });
+  await submit({ preventDefault() {} });
+  before.find((node) => node.type === "textarea")!.props.onKeyDown!({ key: "Enter", shiftKey: false, preventDefault() {} });
+  expect(read).toHaveBeenCalledTimes(1);
+  expect(hooks.chat.status).toBe("ready");
+  let tree = draw();
+  expect(tree.find((node) => node.type === "textarea")!.props.disabled).toBe(true);
+  expect(tree.find((node) => node.props.title === "Send message" || node.props.title === "Update message")!.props.disabled).toBe(true);
+  expect(tree.some((node) => node.props.title === "Stop generating")).toBe(false);
+  expect(tree.find((node) => node.props.title === "Remove attachment")!.props.disabled).toBe(true);
+  expect(tree.find((node) => node.props.children === "Cancel")!.props.disabled).toBe(true);
+  expect(tree.find((node) => node.props.message?.id === "user")!.props.allowEdit).toBe(false);
+  expect(tree.find((node) => node.props.message?.id === "assistant")!.props.allowRegenerate).toBe(false);
+  before.find((node) => node.type === "textarea")!.props.onChange!({ target: { value: "Late change" } });
+  before.find((node) => node.props.title === "Remove attachment")!.props.onClick!();
+  before.find((node) => node.props.children === "Cancel")!.props.onClick!();
+  before.find((node) => node.props.onDrop)!.props.onDrop!({ preventDefault() {}, dataTransfer: { files: [new File(["late"], "late.png", { type: "image/png" })] } });
+  await before.find((node) => node.props.message?.id === "assistant")!.props.onRegenerate!();
+  expect(draw().find((node) => node.type === "textarea")!.props.value).toBe("Send this image");
+  if (fails) reader!.onerror!(); else reader!.onload!();
+  await pending;
+  tree = draw();
+  expect(tree.find((node) => node.type === "textarea")!.props.disabled).toBe(false);
+  expect(requests).toHaveLength(fails ? 0 : 1);
+  if (fails) {
+    expect(tree.find((node) => node.type === "textarea")!.props.value).toBe("Send this image");
+    expect(tree.some((node) => node.props.children === "new.png")).toBe(true);
+    const retry = tree.find((node) => node.type === "form")!.props.onSubmit!({ preventDefault() {} });
+    reader!.onload!();
+    await retry;
+    expect(requests).toHaveLength(1);
+  }
+  expect(requests[0].messages[0].parts).toEqual([{ type: "text", text: "Send this image" }, { type: "file", mediaType: "image/png", filename: "new.png", url: "data:image/png;base64,bmV3" }]);
 });
