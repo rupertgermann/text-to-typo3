@@ -1,5 +1,8 @@
 import { McpHttpError, testMcpConnection } from "@/lib/mcp";
 
+// Bound the entire provider probe, including reading the response body.
+const MODEL_PROVIDER_TEST_TIMEOUT_MS = 10_000;
+
 export type ConnectionErrorCode =
   | "auth_failed"
   | "bad_url"
@@ -33,9 +36,11 @@ export async function runMcpConnectionTest(
 export async function runModelProviderConnectionTest({
   apiKey,
   baseUrl,
+  signal,
 }: {
   apiKey?: string | null;
   baseUrl: string;
+  signal: AbortSignal;
 }): Promise<ModelProviderConnectionTestResult> {
   let modelsUrl: URL;
 
@@ -55,6 +60,10 @@ export async function runModelProviderConnectionTest({
   try {
     const response = await fetch(modelsUrl, {
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+      signal: AbortSignal.any([
+        signal,
+        AbortSignal.timeout(MODEL_PROVIDER_TEST_TIMEOUT_MS),
+      ]),
     });
 
     if (!response.ok) {

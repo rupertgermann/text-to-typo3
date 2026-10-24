@@ -56,6 +56,6 @@ export const POST = withAuth(async (request, auth) => {
   }
 
   return Response.json(
-    await runModelProviderConnectionTest({ apiKey, baseUrl }),
+    await runModelProviderConnectionTest({ apiKey, baseUrl, signal: request.signal }),
   );
 });

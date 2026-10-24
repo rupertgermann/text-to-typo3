@@ -7,6 +7,8 @@ import { getSession, type SessionData } from "@/lib/session";
 import type { IronSession } from "iron-session";
 
 const LOCAL_TOKEN_USER_ID = "local-token-user";
+// shortcut: refresh coordination is process-local; use shared locking before running multiple app processes.
+const pendingAccessTokens = new Map<string, Promise<string | null>>();
 
 function isTokenAuthMode() {
   const env = getEnv();
@@ -18,36 +20,20 @@ function isTokenAuthMode() {
 
 async function ensureLocalTokenUser(): Promise<User> {
   const env = getEnv();
-  const existingUser = await db.query.users.findFirst({
-    where: eq(users.id, LOCAL_TOKEN_USER_ID),
-  });
-
-  if (existingUser) {
-    if (existingUser.display_name !== env.TYPO3_LOCAL_USER_NAME) {
-      await db
-        .update(users)
-        .set({ display_name: env.TYPO3_LOCAL_USER_NAME })
-        .where(eq(users.id, LOCAL_TOKEN_USER_ID));
-
-      return {
-        ...existingUser,
-        display_name: env.TYPO3_LOCAL_USER_NAME,
-      };
-    }
-
-    return existingUser;
-  }
-
-  const [createdUser] = await db
+  const [user] = await db
     .insert(users)
     .values({
       id: LOCAL_TOKEN_USER_ID,
       typo3_uid: LOCAL_TOKEN_USER_ID,
       display_name: env.TYPO3_LOCAL_USER_NAME,
     })
+    .onConflictDoUpdate({
+      target: users.id,
+      set: { display_name: env.TYPO3_LOCAL_USER_NAME },
+    })
     .returning();
 
-  return createdUser!;
+  return user!;
 }
 
 function createLocalTokenSession(): IronSession<SessionData> {
@@ -66,6 +52,19 @@ function createLocalTokenSession(): IronSession<SessionData> {
 export async function getValidAccessToken(
   sessionId: string,
 ): Promise<string | null> {
+  const pending = pendingAccessTokens.get(sessionId);
+  if (pending) return pending;
+
+  const resolution = resolveAccessToken(sessionId);
+  pendingAccessTokens.set(sessionId, resolution);
+  try {
+    return await resolution;
+  } finally {
+    pendingAccessTokens.delete(sessionId);
+  }
+}
+
+async function resolveAccessToken(sessionId: string): Promise<string | null> {
   const session = await db.query.sessions.findFirst({
     where: eq(sessions.id, sessionId),
   });
