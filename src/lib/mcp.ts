@@ -261,6 +261,9 @@ async function postJson(
       (response) => {
         const chunks: Buffer[] = [];
 
+        response.once("error", fail);
+        response.once("aborted", () => fail(new Error("MCP response aborted")));
+
         response.on("data", (chunk) => {
           chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         });
@@ -286,16 +289,19 @@ async function postJson(
     );
 
     const abortRequest = () => {
-      request.destroy(getAbortReason(signal));
+      const error = getAbortReason(signal);
+      fail(error);
+      request.destroy(error);
     };
     const cleanup = () => {
       signal.removeEventListener("abort", abortRequest);
     };
-
-    request.on("error", (error) => {
+    const fail = (error: Error) => {
       cleanup();
       reject(error);
-    });
+    };
+
+    request.once("error", fail);
     signal.addEventListener("abort", abortRequest, { once: true });
     request.write(body);
     request.end();

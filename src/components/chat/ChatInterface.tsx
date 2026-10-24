@@ -38,6 +38,7 @@ import {
   extractMessageText,
 } from "@/lib/chat-message-parts";
 import { readApiErrorMessage } from "@/lib/api-client";
+import { revalidateClientQueries, serializeClientQueryKey } from "@/lib/client-query";
 import {
   starterPrompts,
   type StarterPromptCategory,
@@ -130,6 +131,7 @@ export function ChatInterface({
   const transcriptViewportRef = useRef<HTMLDivElement>(null);
   const shouldStickToBottomRef = useRef(true);
   const submittedDraftRef = useRef<{
+    regenerating: boolean;
     messages: UIMessage[];
     input: string;
     attachments: PendingAttachment[];
@@ -166,11 +168,20 @@ export function ChatInterface({
             ? null
             : draft.editingMessageId,
         );
+        submittedDraftRef.current = null;
+      }
+    },
+    onFinish: ({ message, isError }) => {
+      const draft = submittedDraftRef.current;
+      if (draft?.regenerating && isError && message.parts.every((part) =>
+        part.type === "step-start" ||
+        ((part.type === "text" || part.type === "reasoning") && !part.text),
+      )) {
+        setMessages(draft.messages);
       }
       submittedDraftRef.current = null;
-    },
-    onFinish: () => {
-      submittedDraftRef.current = null;
+      const prefix = serializeClientQueryKey(["conversations"]).slice(0, -1);
+      void revalidateClientQueries((key) => key.startsWith(prefix));
     },
   });
 
@@ -256,6 +267,7 @@ export function ChatInterface({
       setEditingMessageId(null);
       setComposerError(null);
       submittedDraftRef.current = {
+        regenerating: false,
         messages,
         input: currentText,
         attachments: currentAttachments,
@@ -308,6 +320,7 @@ export function ChatInterface({
 
     clearError();
     submittedDraftRef.current = {
+      regenerating: false,
       messages, input, attachments, editingMessageId,
     };
     await sendMessage({
@@ -319,6 +332,7 @@ export function ChatInterface({
   const regenerateMessage = async (messageId: string) => {
     if (submissionPending.current || isLoading) return;
     submittedDraftRef.current = {
+      regenerating: true,
       messages, input, attachments, editingMessageId,
     };
     await regenerate({ messageId });

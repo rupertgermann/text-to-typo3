@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { asc, eq } from "drizzle-orm";
 import { DefaultChatTransport, isToolUIPart, type UIMessage } from "ai";
 import { Chat } from "@ai-sdk/react";
+import { NextRequest } from "next/server";
 import { POST } from "./route";
 import { DELETE as deleteConversation } from "../conversations/[id]/route";
 import * as authentication from "@/lib/auth";
@@ -371,6 +372,36 @@ describe("chat route integration", () => {
     expect(fakeModel.chatRequests).toHaveLength(3);
     expect(chat.lastMessage?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: "Recovered" })]));
   });
+
+  it("persists a truncated HTTPS write, blocks its queued write, and releases admission", async () => {
+    fakeMcp = await startFakeMcpServer({ https: true, truncateToolResponses: true });
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [
+      { chunks: [
+        { choices: [{ index: 0, delta: { role: "assistant", tool_calls: ["tls-sent", "tls-queued"].map((id, index) => ({
+          index, id, type: "function", function: { name: "WriteTable", arguments: JSON.stringify({ action: "create", table: "pages" }) },
+        })) }, finish_reason: null }] },
+        { choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+      ] },
+      createTextResponse({ text: "Next turn" }),
+    ] });
+    await seedTokenModeConversation({ conversationId: "tls-write", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "TLS write", autoApproveWrites: true });
+    const transport = new DefaultChatTransport({ api: "http://localhost/api/chat", body: { conversationId: "tls-write" }, fetch: async (input, init) => POST(new NextRequest(String(input), { ...init, signal: init?.signal ?? undefined })) });
+    const chat = new Chat({ transport });
+    await chat.sendMessage({ text: "Create two pages" });
+
+    expect(chat.error).toBeUndefined();
+    expect(fakeMcp.toolCalls).toHaveLength(1);
+    expect(fakeModel.chatRequests).toHaveLength(1);
+    const saved = await persistedUiMessages("tls-write");
+    expect(saved.at(-1)?.parts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ toolCallId: "tls-sent", state: "output-available", output: expect.objectContaining({ _meta: { operation: "write", outcome: "unknown" } }) }),
+      expect.objectContaining({ toolCallId: "tls-queued", state: "output-available", output: expect.objectContaining({ _meta: { operation: "write", outcome: "blocked" } }) }),
+    ]));
+    const next = await postChat({ conversationId: "tls-write", text: "Continue" });
+    expect(next.status).toBe(200);
+    expect(await next.text()).toContain("Next turn");
+    expect(fakeMcp.toolCalls).toHaveLength(1);
+  }, 6_500);
 
   it.each(["new", "edit", "regenerate"])("retains an uncertain write from a %s turn and blocks replay after reload", async (kind) => {
     fakeMcp = await startFakeMcpServer();
@@ -934,7 +965,11 @@ describe("chat route integration", () => {
 
     expect(streamBody).toContain("The TYPO3 page tree starts with Home.");
     expect(localUser?.display_name).toBe("Local Test Editor");
-    expect(fakeModel.chatRequests).toHaveLength(2);
+    expect(fakeModel.chatRequests).toMatchObject([
+      { stream: true },
+      { stream: true },
+      { messages: expect.arrayContaining([expect.objectContaining({ content: expect.stringContaining("conversation title") })]) },
+    ]);
     expect(fakeModel.modelsRequests).toHaveLength(0);
     expect(fakeMcp.toolCalls).toEqual([
       { name: "GetPageTree", arguments: {} },
@@ -1090,7 +1125,10 @@ describe("chat route integration", () => {
     });
     const assistantMessages = rows.filter((message) => message.role === "assistant");
 
-    expect(fakeModel.chatRequests).toHaveLength(1);
+    expect(fakeModel.chatRequests).toMatchObject([
+      { stream: true },
+      { messages: expect.arrayContaining([expect.objectContaining({ content: expect.stringContaining("conversation title") })]) },
+    ]);
     expect(assistantMessages).toHaveLength(1);
     expect(assistantMessages[0]?.content).toBe("Regenerated answer.");
   });

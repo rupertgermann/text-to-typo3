@@ -1,3 +1,4 @@
+import { ClientRequest } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "@/test/deferred";
 import {
@@ -99,9 +100,67 @@ describe("MCP uncertain write execution", () => {
   afterEach(async () => {
     await fakeMcp?.close();
     resetMcpCachesForTests();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
   });
+
+  it("settles truncated HTTPS writes as unknown and blocks queued writes", async () => {
+    fakeMcp = await startFakeMcpServer({ https: true, truncateToolResponses: true });
+    stubTokenAuthEnv({ mcpUrl: fakeMcp.url });
+    const execution = createMcpExecution();
+    const tools = await getMcpTools({ sessionId: "tls-write", accessToken: "", execution });
+    const startedAt = Date.now();
+    const results = await Promise.all(["first", "queued"].map((toolCallId) =>
+      tools.WriteTable.execute?.({ action: "create", table: "pages" }, { messages: [], toolCallId }),
+    ));
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(results).toMatchObject([
+      { isError: true, _meta: { operation: "write", outcome: "unknown" } },
+      { isError: true, _meta: { operation: "write", outcome: "blocked" } },
+    ]);
+    expect(fakeMcp.toolCalls).toHaveLength(1);
+    expect(execution.hasUnknownOutcome()).toBe(true);
+  }, 6_500);
+
+  it("rejects truncated HTTPS reads without an unknown write outcome", async () => {
+    fakeMcp = await startFakeMcpServer({ https: true, truncateToolResponses: true });
+    stubTokenAuthEnv({ mcpUrl: fakeMcp.url });
+    const execution = createMcpExecution();
+    const tools = await getMcpTools({ sessionId: "tls-read", accessToken: "", execution });
+    await expect(tools.GetPageTree.execute?.({ startPage: 0 }, { messages: [], toolCallId: "read" }))
+      .rejects.toThrow();
+    expect(fakeMcp.toolCalls).toHaveLength(1);
+    expect(execution.hasUnknownOutcome()).toBe(false);
+  }, 6_500);
+
+  it("returns healthy HTTPS read and write results", async () => {
+    fakeMcp = await startFakeMcpServer({ https: true });
+    stubTokenAuthEnv({ mcpUrl: fakeMcp.url });
+    const tools = await getMcpTools({ sessionId: "tls-healthy", accessToken: "" });
+    await expect(tools.GetPageTree.execute?.({ startPage: 0 }, { messages: [], toolCallId: "read" }))
+      .resolves.toMatchObject({ _meta: { operation: "read" } });
+    await expect(tools.WriteTable.execute?.({ action: "create", table: "pages" }, { messages: [], toolCallId: "write" }))
+      .resolves.toMatchObject({ uid: 123, _meta: { operation: "write" } });
+    expect(fakeMcp.toolCalls).toHaveLength(2);
+  });
+
+  it.each([false, true])("times out stalled HTTPS with request.destroy disabled=%s and keeps healthy requests working", async (disableDestroy) => {
+    fakeMcp = await startFakeMcpServer({ https: true, hangMethods: ["tools/call"] });
+    stubTokenAuthEnv({ mcpUrl: fakeMcp.url });
+    const tools = await getMcpTools({ sessionId: "tls-timeout", accessToken: "" });
+    if (disableDestroy) vi.spyOn(ClientRequest.prototype, "destroy").mockImplementation(function (this: ClientRequest) {
+      return this;
+    });
+    await expect(tools.GetPageTree.execute?.({ startPage: 0 }, { messages: [], toolCallId: "read" }))
+      .rejects.toThrow("MCP request timed out");
+    expect(fakeMcp.requests.filter((request) => request.method === "tools/call")).toHaveLength(1);
+    resetMcpCachesForTests();
+    await expect(listMcpToolNamesByOperation({ accessToken: "" })).resolves.toMatchObject({
+      read: expect.arrayContaining(["GetPageTree"]),
+      write: expect.arrayContaining(["WriteTable"]),
+    });
+  }, 6_500);
 
   it("does not dispatch a write stopped while its MCP session refreshes", async () => {
     fakeMcp = await startFakeMcpServer();

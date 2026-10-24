@@ -3,11 +3,16 @@ import { eq } from "drizzle-orm";
 import { createServer } from "node:http";
 import { NextRequest } from "next/server";
 import { GET, PATCH } from "./route";
+import { POST as chatPost } from "@/app/api/chat/route";
 import { db, setupTestDatabase, type TestDatabase } from "@/test/database";
 import { seedLocalTokenUser, stubTokenAuthEnv } from "@/test/auth";
 import { getResolvedUserSettings, upsertUserSettings } from "@/lib/user-settings";
-import { userSettings } from "@/lib/db/schema";
+import { conversations, messages, userSettings } from "@/lib/db/schema";
+import { resolveChatProvider } from "@/lib/chat-provider-resolution";
+import { resetMcpCachesForTests } from "@/lib/mcp";
+import { startFakeMcpServer } from "@/test/fake-mcp-server";
 import {
+  createTextResponse,
   startFakeOpenAICompatibleServer,
   type FakeOpenAICompatibleServer,
 } from "@/test/fake-openai-compatible-server";
@@ -25,6 +30,7 @@ describe("settings route", () => {
   afterEach(async () => {
     await fakeModel?.close();
     fakeModel = null;
+    resetMcpCachesForTests();
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
     testDatabase?.cleanup();
@@ -84,7 +90,7 @@ describe("settings route", () => {
     const catalog = await startDeferredCatalog();
     let earlier: Promise<Response> | undefined;
     try {
-      earlier = patch({ modelId: "local-chat", lmstudioBaseUrl: catalog.url });
+      earlier = patch({ modelId: "local-chat", lmstudioModelId: "local-chat", lmstudioBaseUrl: catalog.url });
       await catalog.entered;
       fakeModel = await startFakeOpenAICompatibleServer({
         chatResponses: [],
@@ -256,6 +262,73 @@ describe("settings route", () => {
     expect(patchResponse.status).toBe(200);
     expect(patched.modelContextWindow).toBe(32768);
     expect(stored?.model_context_window).toBe(32768);
+  });
+
+  it.each([false, true])("uses LM Studio capacity for a colliding model with OpenAI enabled = %s", async (openAiEnabled) => {
+    await seedLocalTokenUser();
+    vi.stubEnv("OPENAI_API_KEY", openAiEnabled ? "test-openai-key" : "");
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : String(input);
+      return Response.json({ data: [{
+        id: "gpt-5.4-mini",
+        ...(url.startsWith("http://local-provider.invalid") ? { context_length: 8192 } : {}),
+      }] });
+    }));
+
+    const response = await patch({
+      modelId: "gpt-5.4-mini", lmstudioModelId: "gpt-5.4-mini",
+      lmstudioBaseUrl: "http://local-provider.invalid/v1",
+    });
+    const settings = await getResolvedUserSettings("local-token-user");
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ modelContextWindow: 8192 });
+    expect(settings.modelContextWindow).toBe(8192);
+    expect(resolveChatProvider({ settings })).toMatchObject({
+      providerKind: "lmstudio", contextWindow: 8192,
+    });
+  });
+
+  it("budgets chat history using the saved capacity of a colliding local model", async () => {
+    await seedLocalTokenUser();
+    fakeModel = await startFakeOpenAICompatibleServer({
+      models: [{ id: "gpt-5.4-mini", context_length: 8192 }],
+      chatResponses: [createTextResponse({ text: "ok" })],
+    });
+    const mcp = await startFakeMcpServer();
+    vi.stubEnv("TYPO3_MCP_URL", mcp.url);
+    try {
+      const saved = await patch({
+        modelId: "gpt-5.4-mini", lmstudioModelId: "gpt-5.4-mini",
+        lmstudioBaseUrl: fakeModel.url,
+      });
+      expect(saved.status).toBe(200);
+      await db.insert(conversations).values({ id: "capacity", user_id: "local-token-user", title: "Capacity test" });
+      const oldPrompt = "words ".repeat(8000);
+      await db.insert(messages).values([
+        { id: "old-user", conversation_id: "capacity", role: "user", content: oldPrompt, created_at: 1 },
+        { id: "old-assistant", conversation_id: "capacity", role: "assistant", content: "Previous answer", created_at: 2 },
+      ]);
+
+      const response = await chatPost(new NextRequest("http://localhost/api/chat", {
+        method: "POST",
+        body: JSON.stringify({
+          conversationId: "capacity",
+          messages: [{ id: "new-user", role: "user", parts: [{ type: "text", text: "Continue" }] }],
+        }),
+      }));
+      expect(response.status).toBe(200);
+      await response.text();
+
+      expect(fakeModel.chatRequests).toHaveLength(1);
+      const outgoing = JSON.stringify(fakeModel.chatRequests[0]);
+      expect(outgoing.includes(oldPrompt)).toBe(false);
+      expect(outgoing).not.toContain("Previous answer");
+      expect(outgoing).toContain("Continue");
+      expect(Math.ceil(outgoing.length / 4)).toBeLessThan(8192);
+    } finally {
+      await mcp.close();
+    }
   });
 
   it("persists custom providers with encrypted keys and rejects invalid base URLs", async () => {

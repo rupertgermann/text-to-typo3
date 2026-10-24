@@ -41,6 +41,7 @@ export function createModelTitleGenerator(model: LanguageModel): TitleGenerator 
     const result = await generateText({
       model,
       maxRetries: 0,
+      abortSignal: AbortSignal.timeout(5000),
       system:
         "Write a concise, single-line conversation title. Return only the title.",
       prompt: [

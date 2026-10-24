@@ -1,4 +1,6 @@
 import http from "node:http";
+import https from "node:https";
+import { readFileSync } from "node:fs";
 import type net from "node:net";
 
 type JsonRpcRequest = {
@@ -337,6 +339,8 @@ const defaultTools: FakeMcpToolDefinition[] = [
 ];
 
 export async function startFakeMcpServer(options?: {
+  https?: boolean;
+  truncateToolResponses?: boolean;
   hangMethods?: string[];
   protocolVersion?: string;
   sessionIds?: string[];
@@ -348,7 +352,7 @@ export async function startFakeMcpServer(options?: {
   const toolCalls: FakeMcpToolCall[] = [];
   let sessionIdIndex = 0;
 
-  const server = http.createServer(async (request, response) => {
+  const handleRequest: http.RequestListener = async (request, response) => {
     if (request.method !== "POST") {
       response.writeHead(405).end();
       return;
@@ -422,6 +426,12 @@ export async function startFakeMcpServer(options?: {
       const toolArguments = params.arguments ?? {};
       toolCalls.push({ name, arguments: toolArguments });
 
+      if (options?.truncateToolResponses) {
+        response.write('{"jsonrpc":"2.0","result":');
+        setTimeout(() => response.destroy(), 20);
+        return;
+      }
+
       response.end(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -439,7 +449,13 @@ export async function startFakeMcpServer(options?: {
         error: { code: -32601, message: `Unknown method ${payload.method}` },
       }),
     );
-  });
+  };
+  const server = options?.https
+    ? https.createServer({
+      key: readFileSync(new URL("./fixtures/localhost-key.pem", import.meta.url)),
+      cert: readFileSync(new URL("./fixtures/localhost-cert.pem", import.meta.url)),
+    }, handleRequest)
+    : http.createServer(handleRequest);
 
   server.on("connection", (socket) => {
     sockets.add(socket);
@@ -458,7 +474,7 @@ export async function startFakeMcpServer(options?: {
   return {
     requests,
     toolCalls,
-    url: `http://127.0.0.1:${address.port}`,
+    url: `${options?.https ? "https" : "http"}://127.0.0.1:${address.port}`,
     close: () => close(server, sockets),
   };
 }

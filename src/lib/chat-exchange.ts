@@ -301,7 +301,8 @@ export async function streamChatExchange({
           userText: turn.userText,
         });
 
-        void titleGeneration;
+        release();
+        await titleGeneration;
       },
     });
     const response = createUIMessageStreamResponse({
