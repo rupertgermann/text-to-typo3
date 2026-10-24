@@ -103,6 +103,50 @@ describe("MCP transport caches", () => {
     vi.unstubAllEnvs();
   });
 
+  it("refreshes tools and the MCP session when the same session receives a new token", async () => {
+    fakeMcp = await startFakeMcpServer({
+      sessionIds: ["initial-session", "first-token-session", "refreshed-token-session"],
+    });
+    stubTokenAuthEnv({ mcpUrl: fakeMcp.url });
+
+    const firstTools = await getMcpTools({
+      sessionId: "conversation-token-refresh",
+      accessToken: "first-token",
+    });
+    await firstTools.GetPageTree.execute?.(
+      { startPage: 0 },
+      { messages: [], toolCallId: "first" },
+    );
+    const refreshedTools = await getMcpTools({
+      sessionId: "conversation-token-refresh",
+      accessToken: "refreshed-token",
+    });
+    await refreshedTools.GetPageTree.execute?.(
+      { startPage: 0 },
+      { messages: [], toolCallId: "refreshed" },
+    );
+    const reusedTools = await getMcpTools({
+      sessionId: "conversation-token-refresh",
+      accessToken: "refreshed-token",
+    });
+
+    const toolCalls = fakeMcp.requests.filter((request) => request.method === "tools/call");
+    expect(toolCalls.map((request) => ({
+      authorization: request.headers.authorization,
+      sessionId: request.headers["mcp-session-id"],
+    }))).toEqual([
+      { authorization: "Bearer first-token", sessionId: "first-token-session" },
+      { authorization: "Bearer refreshed-token", sessionId: "refreshed-token-session" },
+    ]);
+    const initializations = fakeMcp.requests.filter((request) => request.method === "initialize");
+    expect(initializations.map((request) => request.headers.authorization)).toEqual([
+      "Bearer first-token", "Bearer refreshed-token",
+    ]);
+    expect(initializations.every((request) => !request.headers["mcp-session-id"])).toBe(true);
+    expect(fakeMcp.requests.filter((request) => request.method === "tools/list")).toHaveLength(2);
+    expect(reusedTools).toBe(refreshedTools);
+  });
+
   it("reuses cached MCP session ids within the server TTL safety window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));

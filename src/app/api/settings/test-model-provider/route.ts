@@ -30,10 +30,10 @@ export const POST = withAuth(async (request, auth) => {
   const savedCustomProvider = provider === "custom" && customProviderId
     ? settings.customProviders.find((entry) => entry.id === customProviderId)
     : null;
-  const baseUrl = typeof body.baseUrl === "string" && body.baseUrl.trim()
-    ? body.baseUrl.trim()
-    : provider === "openai"
-      ? "https://api.openai.com/v1"
+  const baseUrl = provider === "openai"
+    ? "https://api.openai.com/v1"
+    : typeof body.baseUrl === "string" && body.baseUrl.trim()
+      ? body.baseUrl.trim()
       : provider === "custom"
         ? savedCustomProvider?.baseUrl
         : settings.lmstudioBaseUrl;
@@ -41,7 +41,7 @@ export const POST = withAuth(async (request, auth) => {
     ? body.apiKey.trim()
     : provider === "openai"
       ? settings.openAiApiKey
-      : provider === "custom"
+      : provider === "custom" && baseUrl === savedCustomProvider?.baseUrl
         ? savedCustomProvider?.apiKey
         : null;
 
