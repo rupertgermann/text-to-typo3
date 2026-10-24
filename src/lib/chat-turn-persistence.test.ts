@@ -79,6 +79,22 @@ describe("chat turn persistence", () => {
     expect(rows[0]?.output_tokens).toBe(4);
   });
 
+  it("preserves a manual title saved while the response was running", async () => {
+    const conversation = await seedConversation("rename-race", "New conversation");
+    await db.update(conversations).set({ title: "My manual title", updated_at: 1 }).where(eq(conversations.id, conversation.id));
+    const titleGenerator = vi.fn(async () => "Generated title");
+    const { titleGeneration } = await persistChatTurn({
+      assistantMessageId: "response-id", assistantText: "Done", continuationAssistantMessageId: null,
+      conversation, responseParts: [{ type: "text", text: "Done" }], titleGenerator,
+      tokenUsage: { inputTokens: null, outputTokens: null }, userText: "Create a landing page",
+    });
+    await titleGeneration;
+    expect((await db.query.conversations.findFirst({ where: eq(conversations.id, conversation.id) }))?.title).toBe("My manual title");
+    expect((await db.query.conversations.findFirst({ where: eq(conversations.id, conversation.id) }))?.updated_at).toBeGreaterThan(1);
+    expect(titleGenerator).not.toHaveBeenCalled();
+    expect(await latestAssistant(conversation.id)).not.toBeNull();
+  });
+
   it("sets a fallback title and then applies generated title updates", async () => {
     const conversation = await seedConversation("title-conversation", "New conversation");
 

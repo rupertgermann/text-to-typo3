@@ -1,6 +1,7 @@
 import http from "node:http";
 import https from "node:https";
 import { jsonSchema, tool, type ToolSet } from "ai";
+import { hasUnknownWriteOutcome, unknownWriteResult } from "@/lib/mcp-outcome";
 import { getEnv } from "@/lib/env";
 
 type JsonRpcSuccess<T> = {
@@ -44,6 +45,7 @@ type CachedToolSet = {
   fetchedAt: number;
   requireWriteApproval: boolean;
   tools: ToolSet;
+  readToolNames: string[];
 };
 
 type McpMethodResponse<T> = {
@@ -70,6 +72,44 @@ export class McpHttpError extends Error {
   constructor(public readonly status: number) {
     super(`MCP request failed with status ${status}`);
   }
+}
+
+class McpRpcError extends Error {
+  constructor(public readonly code: number, message: string) {
+    super(message);
+  }
+}
+
+// One exchange owns this queue, so cached tools never share recovery state.
+export function createMcpExecution() {
+  let uncertain = false;
+  let queue = Promise.resolve();
+  return {
+    hasUnknownOutcome: () => uncertain,
+    wrap: (tools: ToolSet, readToolNames: string[]): ToolSet => Object.fromEntries(
+      Object.entries(tools).map(([name, definition]) => {
+        const execute = definition.execute;
+        if (!execute || readToolNames.includes(name)) return [name, definition];
+        return [name, {
+          ...definition,
+          execute: (input, options) => {
+            const result = queue.then(async () => {
+              if (uncertain) return {
+                isError: true,
+                content: [{ type: "text", text: "Not executed because an earlier TYPO3 write outcome is unknown." }],
+                _meta: { operation: "write", outcome: "blocked" },
+              };
+              const output = await execute(input, options);
+              uncertain ||= hasUnknownWriteOutcome(output);
+              return output;
+            });
+            queue = result.then(() => undefined, () => undefined);
+            return result;
+          },
+        } satisfies ToolSet[string]];
+      }),
+    ),
+  };
 }
 
 const TOOL_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -132,7 +172,12 @@ function buildBackendRecordUrl(output: unknown): string | null {
   }
 
   const env = getEnv();
-  const url = new URL("/typo3/record/edit", env.TYPO3_BASE_URL);
+  let url: URL;
+  try {
+    url = new URL("/typo3/record/edit", env.TYPO3_BASE_URL);
+  } catch {
+    return null;
+  }
   url.searchParams.set(`edit[${table}][${uid}]`, "edit");
   url.searchParams.set("returnUrl", "/typo3/module/web/layout");
   return url.toString();
@@ -351,7 +396,7 @@ async function callMcpMethod<T>({
   const payload = JSON.parse(response.body) as JsonRpcSuccess<T> | JsonRpcError;
 
   if ("error" in payload) {
-    throw new Error(payload.error.message);
+    throw new McpRpcError(payload.error.code, payload.error.message);
   }
 
   return {
@@ -409,10 +454,12 @@ export async function getMcpTools({
   sessionId,
   accessToken,
   requireWriteApproval = true,
+  execution,
 }: {
   sessionId: string;
   accessToken: string;
   requireWriteApproval?: boolean;
+  execution?: ReturnType<typeof createMcpExecution>;
 }): Promise<ToolSet> {
   const toolCacheKey = sessionId;
   const cached = toolCache.get(toolCacheKey);
@@ -427,7 +474,7 @@ export async function getMcpTools({
   ) {
     toolCache.delete(toolCacheKey);
   } else if (cached && now - cached.fetchedAt < TOOL_CACHE_TTL_MS) {
-    return cached.tools;
+    return execution ? execution.wrap(cached.tools, cached.readToolNames) : cached.tools;
   }
 
   let mcpSession = getCachedMcpSession(sessionId, now);
@@ -491,16 +538,32 @@ export async function getMcpTools({
               }
             }
 
-            const result = await callMcpMethod<McpToolResult>({
-              accessToken,
-              method: "tools/call",
-              params: {
-                name: mcpTool.name,
-                arguments: input,
-              },
-              protocolVersion: executeMcpSession?.protocolVersion,
-              sessionHeaderId: executeMcpSession?.sessionId,
-            });
+            let result: McpMethodResponse<McpToolResult>;
+            try {
+              result = await callMcpMethod<McpToolResult>({
+                accessToken,
+                method: "tools/call",
+                params: {
+                  name: mcpTool.name,
+                  arguments: input,
+                },
+                protocolVersion: executeMcpSession?.protocolVersion,
+                sessionHeaderId: executeMcpSession?.sessionId,
+              });
+              if (!result.result || typeof result.result !== "object" || Array.isArray(result.result)) {
+                throw new Error("Invalid MCP tool result");
+              }
+            } catch (error) {
+              if (operation === "read") throw error;
+              if (error instanceof McpRpcError && error.code === -32602) {
+                return {
+                  isError: true,
+                  content: [{ type: "text", text: error.message }],
+                  _meta: { operation, outcome: "rejected" },
+                };
+              }
+              return unknownWriteResult();
+            }
 
             const backendRecordUrl =
               operation === "write" ? buildBackendRecordUrl(result.result) : null;
@@ -522,8 +585,11 @@ export async function getMcpTools({
     }),
   );
 
-  toolCache.set(toolCacheKey, { accessToken, fetchedAt: now, requireWriteApproval, tools });
-  return tools;
+  const readToolNames = listResponse.result.tools
+    .filter((definition) => classifyMcpTool(definition) === "read")
+    .map((definition) => definition.name);
+  toolCache.set(toolCacheKey, { accessToken, fetchedAt: now, requireWriteApproval, tools, readToolNames });
+  return execution ? execution.wrap(tools, readToolNames) : tools;
 }
 
 export async function listMcpToolNamesByOperation({

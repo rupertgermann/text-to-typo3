@@ -5,10 +5,12 @@ import { encrypt, decrypt } from "@/lib/crypto";
 import { getEnv } from "@/lib/env";
 import { getSession, type SessionData } from "@/lib/session";
 import type { IronSession } from "iron-session";
+import { oauthRequest, parseOAuthTokens } from "@/lib/oauth";
 
 const LOCAL_TOKEN_USER_ID = "local-token-user";
 // shortcut: refresh coordination is process-local; use shared locking before running multiple app processes.
 const pendingAccessTokens = new Map<string, Promise<string | null>>();
+const pendingLogouts = new Map<string, Promise<void>>();
 
 function isTokenAuthMode() {
   const env = getEnv();
@@ -52,13 +54,18 @@ function createLocalTokenSession(): IronSession<SessionData> {
 export async function getValidAccessToken(
   sessionId: string,
 ): Promise<string | null> {
+  if (pendingLogouts.has(sessionId)) return null;
   const pending = pendingAccessTokens.get(sessionId);
-  if (pending) return pending;
+  if (pending) {
+    const token = await pending;
+    return pendingLogouts.has(sessionId) ? null : token;
+  }
 
   const resolution = resolveAccessToken(sessionId);
   pendingAccessTokens.set(sessionId, resolution);
   try {
-    return await resolution;
+    const token = await resolution;
+    return pendingLogouts.has(sessionId) ? null : token;
   } finally {
     pendingAccessTokens.delete(sessionId);
   }
@@ -82,28 +89,26 @@ async function resolveAccessToken(sessionId: string): Promise<string | null> {
   if (!session.refresh_token) return null;
 
   const env = getEnv();
-  const refreshResponse = await fetch(`${env.TYPO3_BASE_URL}/oauth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: decrypt(session.refresh_token),
-      client_id: env.TYPO3_OAUTH_CLIENT_ID,
-      client_secret: env.TYPO3_OAUTH_CLIENT_SECRET,
-    }),
-  });
+  const tokens = await oauthRequest(
+    `${env.TYPO3_BASE_URL}/oauth/token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: decrypt(session.refresh_token),
+        client_id: env.TYPO3_OAUTH_CLIENT_ID,
+        client_secret: env.TYPO3_OAUTH_CLIENT_SECRET,
+      }),
+    },
+    async (response) => response.ok ? parseOAuthTokens(await response.json()) : null,
+  );
 
-  if (!refreshResponse.ok) return null;
-
-  const tokens: {
-    access_token: string;
-    refresh_token?: string;
-    expires_in?: number;
-  } = await refreshResponse.json();
+  if (!tokens) return null;
 
   const newExpiresAt = now + (tokens.expires_in || 3600);
 
-  await db
+  const updated = await db
     .update(sessions)
     .set({
       access_token: encrypt(tokens.access_token),
@@ -112,9 +117,10 @@ async function resolveAccessToken(sessionId: string): Promise<string | null> {
         : session.refresh_token,
       expires_at: newExpiresAt,
     })
-    .where(eq(sessions.id, sessionId));
+    .where(eq(sessions.id, sessionId))
+    .returning({ id: sessions.id });
 
-  return tokens.access_token;
+  return updated.length ? tokens.access_token : null;
 }
 
 export interface AuthenticatedUserContext {
@@ -171,9 +177,9 @@ export async function getAuthenticatedUser():
     return null;
   }
 
-  const accessToken = await getValidAccessToken(session.sessionId);
+  const accessToken = await getValidAccessToken(session.sessionId).catch(() => null);
 
-  if (!accessToken) {
+  if (!accessToken || pendingLogouts.has(session.sessionId)) {
     return null;
   }
 
@@ -187,48 +193,51 @@ async function revokeToken(token: string): Promise<void> {
 
   const env = getEnv();
 
-  await fetch(`${env.TYPO3_BASE_URL}/oauth/revoke`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      token,
-      client_id: env.TYPO3_OAUTH_CLIENT_ID,
-      client_secret: env.TYPO3_OAUTH_CLIENT_SECRET,
-    }),
-  });
+  await oauthRequest(
+    `${env.TYPO3_BASE_URL}/oauth/revoke`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        token,
+        client_id: env.TYPO3_OAUTH_CLIENT_ID,
+        client_secret: env.TYPO3_OAUTH_CLIENT_SECRET,
+      }),
+    },
+    async (response) => { await response.arrayBuffer(); },
+  );
 }
 
-/**
- * Best-effort TYPO3 token revocation used during logout. Failures should not
- * block local session cleanup.
- */
+/** Blocks new refreshes, revokes the last persisted credentials, and removes the session. */
 export async function revokeSessionTokens(sessionId: string): Promise<void> {
-  if (isTokenAuthMode()) {
-    return;
-  }
+  if (isTokenAuthMode()) return;
+  const pending = pendingLogouts.get(sessionId);
+  if (pending) return pending;
 
-  const session = await db.query.sessions.findFirst({
-    where: eq(sessions.id, sessionId),
-  });
-
-  if (!session) {
-    return;
-  }
-
-  const tokens: string[] = [];
-
+  const logout = finishLogout(sessionId);
+  pendingLogouts.set(sessionId, logout);
   try {
-    const accessToken = await getValidAccessToken(sessionId);
-    if (accessToken) {
-      tokens.push(accessToken);
-    }
-  } catch {
-    // Ignore refresh/retrieval failures and still attempt to revoke what we have.
+    await logout;
+  } finally {
+    pendingLogouts.delete(sessionId);
   }
+}
 
-  if (session.refresh_token) {
-    tokens.push(decrypt(session.refresh_token));
+async function finishLogout(sessionId: string): Promise<void> {
+  try {
+    // A refresh already sent upstream may rotate both credentials before logout.
+    await pendingAccessTokens.get(sessionId)?.catch(() => null);
+    const session = await db.query.sessions.findFirst({
+      where: eq(sessions.id, sessionId),
+    });
+    if (!session) return;
+
+    await Promise.allSettled(
+      [session.access_token, session.refresh_token].map(async (token) => {
+        if (token) await revokeToken(decrypt(token));
+      }),
+    );
+  } finally {
+    await db.delete(sessions).where(eq(sessions.id, sessionId));
   }
-
-  await Promise.allSettled(tokens.map((token) => revokeToken(token)));
 }

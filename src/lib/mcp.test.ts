@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   getMcpTools,
+  createMcpExecution,
   listMcpToolNamesByOperation,
   resetMcpCachesForTests,
 } from "@/lib/mcp";
@@ -89,6 +90,44 @@ describe("MCP tool annotation classification", () => {
     expect(readResult).toMatchObject({ _meta: { operation: "read" } });
     expect(writeResult).toMatchObject({ _meta: { operation: "write" } });
     expect(unannotatedResult).toMatchObject({ _meta: { operation: "write" } });
+  });
+});
+
+describe("MCP uncertain write execution", () => {
+  let fakeMcp: FakeMcpServer | null = null;
+  afterEach(async () => {
+    await fakeMcp?.close();
+    resetMcpCachesForTests();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it.each(["lost response", "malformed result"])("serializes writes after %s and isolates the next exchange", async (failure) => {
+    fakeMcp = await startFakeMcpServer();
+    stubTokenAuthEnv({ mcpUrl: fakeMcp.url });
+    const realFetch = globalThis.fetch;
+    let loseResponse = true;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await realFetch(input, init);
+      if (String(init?.body).includes('"name":"WriteTable"') && loseResponse) {
+        await response.text();
+        if (failure === "malformed result") return Response.json({ jsonrpc: "2.0", id: "invalid", result: null });
+        throw new TypeError("Response lost after commit");
+      }
+      return response;
+    });
+    const execution = createMcpExecution();
+    const tools = await getMcpTools({ sessionId: "parallel", accessToken: "", execution });
+    const results = await Promise.all(["one", "two"].map((toolCallId) => tools.WriteTable.execute?.({ action: "create", table: "pages" }, { messages: [], toolCallId })));
+    expect(results).toMatchObject([{ _meta: { outcome: "unknown" } }, { _meta: { outcome: "blocked" } }]);
+    expect(fakeMcp.toolCalls).toHaveLength(1);
+    expect(execution.hasUnknownOutcome()).toBe(true);
+    await tools.GetPageTree.execute?.({ startPage: 0 }, { messages: [], toolCallId: "read" });
+    expect(fakeMcp.toolCalls.at(-1)?.name).toBe("GetPageTree");
+    loseResponse = false;
+    const fresh = await getMcpTools({ sessionId: "parallel", accessToken: "", execution: createMcpExecution() });
+    await fresh.WriteTable.execute?.({ action: "create", table: "pages" }, { messages: [], toolCallId: "new-turn" });
+    expect(fakeMcp.toolCalls.filter((call) => call.name === "WriteTable")).toHaveLength(2);
   });
 });
 

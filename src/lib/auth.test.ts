@@ -118,6 +118,43 @@ describe("authentication concurrency", () => {
     }
   });
 
+  it.each(["headers", "body"])("aborts stalled refresh %s and releases same-session waiters for retry", async (stage) => {
+    await seedLocalTokenUser();
+    await seedExpiredSession();
+    vi.useFakeTimers();
+    const stalled = deferred<Response>();
+    const entered = deferred<void>();
+    let aborted = false;
+    const fetchMock = vi.fn<typeof fetch>(async (_input, init) => {
+      init?.signal?.addEventListener("abort", () => {
+        aborted = true;
+        stalled.reject(new Error("secret upstream detail"));
+      });
+      entered.resolve();
+      if (stage === "headers") return stalled.promise;
+      const response = new Response(null);
+      response.json = () => stalled.promise;
+      return response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const requests = Promise.allSettled([getValidAccessToken("rotating-session"), getValidAccessToken("rotating-session")]);
+    await entered.promise;
+    try {
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(aborted).toBe(true);
+      const results = await requests;
+      expect(results.map(result => result.status)).toEqual(["rejected", "rejected"]);
+      expect(JSON.stringify(results)).not.toContain("secret upstream detail");
+      fetchMock.mockResolvedValue(Response.json({ access_token: "retry", expires_in: 3600 }));
+      expect(await getValidAccessToken("rotating-session")).toBe("retry");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      stalled.resolve(Response.json({ access_token: "cleanup" }));
+      await requests;
+      vi.useRealTimers();
+    }
+  });
+
   it("creates one canonical token user for simultaneous first requests and keeps its display name current", async () => {
     const handler = withAuth(async (_request, auth) => Response.json(auth.user));
     const request = new NextRequest("http://localhost/api/protected");

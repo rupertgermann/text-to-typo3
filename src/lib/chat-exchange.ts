@@ -2,9 +2,12 @@ import { asc, eq } from "drizzle-orm";
 import {
   consumeStream,
   convertToModelMessages,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
   stepCountIs,
   streamText,
   type UIMessage,
+  isToolUIPart,
 } from "ai";
 import type { AuthenticatedUserContext } from "@/lib/auth";
 import { apiError, badRequest, notFound, upstreamError } from "@/lib/api-route";
@@ -34,9 +37,11 @@ import { messages } from "@/lib/db/schema";
 import { getEnv } from "@/lib/env";
 import {
   getMcpTools,
-  getTypo3McpUrl,
+  createMcpExecution,
   listMcpToolNamesByOperation,
+  getTypo3McpUrl,
 } from "@/lib/mcp";
+import { hasUnknownWriteOutcome, normalizeNativeMcpOutput, unknownWriteResult } from "@/lib/mcp-outcome";
 import { getResolvedUserSettings } from "@/lib/user-settings";
 import { normalizeLanguageModelUsage } from "@/lib/token-usage";
 
@@ -48,6 +53,7 @@ const SYSTEM_PROMPT = `TYPO3 MCP operating policy:
 - Write operations are queued as TYPO3 workspace changes. They are not live until an editor publishes them in the TYPO3 backend. Describe successful writes as queued workspace changes, not published or live changes.
 - Do not ask for extra confirmation for narrow, reversible edits the user clearly requested; rely on the app's write approval gate when present. Ask for confirmation before broad, risky, destructive, or many-record changes. If a write approval is pending, wait for the user's approve or deny response.
 - When a write returns validation, missing-input, or rejected-field feedback, treat the tool output as retry guidance. Adjust from the error and available schema or context, then retry unless the output proves a real blocker.
+- If a write outcome is unknown, stop. Do not retry it or assume it failed. Tell the user to check the TYPO3 workspace and reconcile the result in a new message.
 - Do not restate or depend on WriteTable parameter mechanics beyond what the active tool description and schema provide.
 - Translation workflows are experimental. Only translate, localize, or update translated TYPO3 records when the user explicitly asks for translation work, and state any uncertainty before writing.
 
@@ -125,42 +131,41 @@ export async function streamChatExchange({
     const maxSteps = getAgentLoopMaxSteps();
     const requireWriteApproval = !Boolean(turn.conversation.auto_approve_writes);
 
+    const execution = createMcpExecution();
+    const nativeApprovalNames = turn.nativeApprovalNames;
+    const nativeContinuation = nativeApprovalNames.length > 0;
+    let nativeReadToolNames: string[] = [];
     let tools;
     try {
-      if (
-        providerResolution.providerKind === "openai" &&
-        providerResolution.supportsBuiltInMcpTool
-      ) {
-        const readToolNames = requireWriteApproval
-          ? (await listMcpToolNamesByOperation({ accessToken: auth.accessToken })).read
-          : [];
-
-        tools = {
-          typo3: providerResolution.provider.tools.mcp({
-            serverLabel: "typo3",
-            serverUrl: getTypo3McpUrl(),
-            serverDescription:
-              "TYPO3 MCP server for reading and updating TYPO3 content and configuration.",
-            requireApproval: requireWriteApproval
-              ? { never: { toolNames: readToolNames } }
-              : "never",
-            headers: auth.accessToken
-              ? { Authorization: `Bearer ${auth.accessToken}` }
-              : undefined,
-          }),
-        };
-      } else {
-        tools = await getMcpTools({
-          sessionId: auth.session.sessionId || `token:${auth.user.id}`,
-          accessToken: auth.accessToken,
-          requireWriteApproval,
-        });
+      if (nativeContinuation) {
+        if (providerResolution.providerKind !== "openai") {
+          return badRequest("Continue the saved approval with an OpenAI model.");
+        }
+        nativeReadToolNames = (await listMcpToolNamesByOperation({ accessToken: auth.accessToken })).read;
       }
+      tools = nativeContinuation
+        ? {
+            typo3: providerResolution.provider.tools.mcp({
+              serverLabel: "typo3",
+              serverUrl: getTypo3McpUrl(),
+              requireApproval: "always",
+              allowedTools: nativeApprovalNames,
+              headers: auth.accessToken
+                ? { Authorization: `Bearer ${auth.accessToken}` }
+                : undefined,
+            }),
+          }
+        : await getMcpTools({
+            sessionId: auth.session.sessionId || `token:${auth.user.id}`,
+            accessToken: auth.accessToken,
+            requireWriteApproval,
+            execution,
+          });
     } catch (error) {
       return upstreamError(getChatErrorMessage(error, "mcp"));
     }
 
-    tools = addWebSearchTool({ providerResolution, tools });
+    if (!nativeContinuation) tools = addWebSearchTool({ providerResolution, tools });
 
     try {
       turn.claimApproval?.();
@@ -201,13 +206,31 @@ export async function streamChatExchange({
       reservedOutputTokens: 4096,
     });
 
+    const nativeApprovedParts = nativeContinuation
+      ? originalMessages.filter((message) => message.id === turn.continuationAssistantMessageId).flatMap((message) => message.parts).filter(
+          (part) => part.type === "dynamic-tool" && part.toolName.startsWith("mcp.") &&
+            part.state === "approval-responded" && part.approval.approved,
+        )
+      : [];
     const result = streamText({
       model: providerResolution.model,
       maxRetries: 0,
       system: [SYSTEM_PROMPT, env.TYPO3_MCP_SYSTEM_PROMPT].filter(Boolean).join("\n\n"),
       messages: budgetedModelMessages,
-      stopWhen: stepCountIs(maxSteps),
+      stopWhen: [stepCountIs(nativeContinuation ? 1 : maxSteps), () => execution.hasUnknownOutcome()],
       tools,
+      experimental_transform: () => new TransformStream({
+        transform(chunk, controller) {
+          if (nativeContinuation && chunk.type === "tool-result" && chunk.toolName.startsWith("mcp.")) {
+            controller.enqueue({
+              ...chunk,
+              output: normalizeNativeMcpOutput(chunk.output, nativeReadToolNames.includes(chunk.toolName.slice(4)) ? "read" : "write"),
+            });
+          } else {
+            controller.enqueue(chunk);
+          }
+        },
+      }),
       prepareStep: ({ stepNumber, steps }) =>
         getAgentLoopStepOptions({
           isChatCompletionsPath: providerResolution.isChatCompletionsPath,
@@ -219,21 +242,45 @@ export async function streamChatExchange({
     });
 
     let streamFailed = false;
-    const response = result.toUIMessageStreamResponse({
-      // Finish recording tool results even if the browser disconnects.
-      consumeSseStream: ({ stream }) => {
-        void consumeStream({ stream }).finally(release);
-      },
+    const handleError = (error: unknown) => {
+      streamFailed = true;
+      return getChatErrorMessage(error, "provider");
+    };
+    const stream = createUIMessageStream({
       originalMessages: turn.continuationAssistantMessageId
         ? originalMessages
         : undefined,
-      generateMessageId: () => crypto.randomUUID(),
-      onError: (error) => {
-        streamFailed = true;
-        return getChatErrorMessage(error, "provider");
+      generateId: () => crypto.randomUUID(),
+      onError: handleError,
+      execute: async ({ writer }) => {
+        const completedCalls = new Set<string>();
+        const retainMissingNativeResults = () => {
+          for (const part of nativeApprovedParts) {
+            if (part.type !== "dynamic-tool" || completedCalls.has(part.toolCallId) || nativeReadToolNames.includes(part.toolName.slice(4))) continue;
+            completedCalls.add(part.toolCallId);
+            writer.write({
+              type: "tool-output-available",
+              toolCallId: part.toolCallId,
+              output: unknownWriteResult(),
+              dynamic: true,
+              providerExecuted: true,
+            });
+          }
+        };
+        try {
+          for await (const chunk of result.toUIMessageStream({ onError: handleError })) {
+            if (chunk.type === "tool-output-available") completedCalls.add(chunk.toolCallId);
+            if (chunk.type === "error" || chunk.type === "finish") retainMissingNativeResults();
+            writer.write(chunk);
+          }
+        } finally {
+          retainMissingNativeResults();
+        }
       },
       onFinish: async ({ responseMessage, isAborted }) => {
-        const failed = streamFailed || isAborted;
+        const failed = streamFailed || isAborted || responseMessage.parts.some(
+          (part) => isToolUIPart(part) && part.state === "output-available" && hasUnknownWriteOutcome(part.output),
+        );
         const tokenUsage = failed
           ? { inputTokens: null, outputTokens: null }
           : normalizeLanguageModelUsage(await result.totalUsage);
@@ -250,6 +297,13 @@ export async function streamChatExchange({
         });
 
         void titleGeneration;
+      },
+    });
+    const response = createUIMessageStreamResponse({
+      stream,
+      // Finish recording tool results even if the browser disconnects.
+      consumeSseStream: ({ stream }) => {
+        void consumeStream({ stream }).finally(release);
       },
     });
     streaming = true;

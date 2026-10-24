@@ -49,6 +49,114 @@ describe("chat route integration", () => {
     testDatabase = null;
   });
 
+  it("uses the app bridge for a fresh nano turn and stops after a lost write response", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [] });
+    await seedTokenModeConversation({ conversationId: "nano-bridge", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Nano", autoApproveWrites: true });
+    await db.update(userSettings).set({ model_id: "gpt-5.4-nano", lmstudio_model_id: null, lmstudio_base_url: null });
+    vi.stubEnv("OPENAI_API_KEY", "synthetic");
+    const realFetch = globalThis.fetch;
+    const providerRequests: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith("https://api.openai.com/")) {
+        providerRequests.push(String(init?.body));
+        const argumentsJson = JSON.stringify({ action: "create", table: "pages" });
+        const item = { type: "function_call", id: "function-item", call_id: "nano-write", name: "WriteTable", arguments: "" };
+        const events = [
+          { type: "response.created", response: { id: "nano-response", created_at: 1, model: "gpt-5.4-nano" } },
+          { type: "response.output_item.added", output_index: 0, item },
+          { type: "response.function_call_arguments.delta", item_id: item.id, output_index: 0, delta: argumentsJson },
+          { type: "response.output_item.done", output_index: 0, item: { ...item, arguments: argumentsJson, status: "completed" } },
+          { type: "response.completed", response: { id: "nano-response", usage: { input_tokens: 10, output_tokens: 10 }, incomplete_details: null } },
+        ];
+        return new Response(events.map((value) => `data: ${JSON.stringify(value)}\n\n`).join(""), { headers: { "Content-Type": "text/event-stream" } });
+      }
+      const response = await realFetch(input, init);
+      if (String(input).startsWith(fakeMcp!.url) && String(init?.body).includes('"tools/call"')) {
+        await response.text();
+        throw new TypeError("Response lost after commit");
+      }
+      return response;
+    });
+    const chat = new Chat({ transport: new DefaultChatTransport({ api: "http://localhost/api/chat", body: { conversationId: "nano-bridge" }, fetch: async (input, init) => POST(new Request(String(input), init) as never) }) });
+    await chat.sendMessage({ text: "Create a page" });
+    expect(chat.error).toBeUndefined();
+    expect(fakeMcp.toolCalls, JSON.stringify(chat.messages)).toHaveLength(1);
+    expect(providerRequests).toHaveLength(1);
+    const wire = JSON.parse(providerRequests[0]);
+    expect(wire.model).toBe("gpt-5.4-nano");
+    expect(wire.tools).toEqual(expect.arrayContaining([expect.objectContaining({ type: "function", name: "WriteTable" })]));
+    expect(wire.tools.some((tool: { type: string }) => tool.type === "mcp")).toBe(false);
+    expect(JSON.stringify(await persistedUiMessages("nano-bridge"))).toContain('"outcome":"unknown"');
+  });
+
+  it.each(["read", "validation"])("allows recovery after a definite %s failure", async (kind) => {
+    fakeMcp = await startFakeMcpServer();
+    const toolName = kind === "read" ? "GetPageTree" : "WriteTable";
+    const input = kind === "read" ? { startPage: 0 } : { action: "create", table: "pages" };
+    const call = (toolCallId: string) => createToolCallResponse({ toolCallId, toolName, argumentsJson: JSON.stringify(input) });
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [call("failed"), call("corrected"), createTextResponse({ text: "Recovered" })] });
+    await seedTokenModeConversation({ conversationId: "recoverable", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Recovery", autoApproveWrites: true });
+    const realFetch = globalThis.fetch;
+    let failed = false;
+    vi.stubGlobal("fetch", async (request: RequestInfo | URL, init?: RequestInit) => {
+      if (!failed && String(request).startsWith(fakeMcp!.url) && String(init?.body).includes('"tools/call"')) {
+        failed = true;
+        if (kind === "read") throw new TypeError("Read connection interrupted");
+        return Response.json({ jsonrpc: "2.0", id: "rejected", error: { code: -32602, message: "Missing required field" } });
+      }
+      return realFetch(request, init);
+    });
+    const chat = new Chat({ transport: new DefaultChatTransport({ api: "http://localhost/api/chat", body: { conversationId: "recoverable" }, fetch: async (input, init) => POST(new Request(String(input), init) as never) }) });
+    await chat.sendMessage({ text: kind === "read" ? "Read the tree" : "Create a page" });
+    expect(chat.error).toBeUndefined();
+    expect(fakeMcp.toolCalls).toHaveLength(1);
+    expect(fakeModel.chatRequests).toHaveLength(3);
+    expect(chat.lastMessage?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: "Recovered" })]));
+  });
+
+  it.each(["new", "edit", "regenerate"])("retains an uncertain write from a %s turn and blocks replay after reload", async (kind) => {
+    fakeMcp = await startFakeMcpServer();
+    const write = (id: string) => createToolCallResponse({ toolCallId: id, toolName: "WriteTable", argumentsJson: JSON.stringify({ action: "create", table: "pages", data: { title: "Lost write" } }) });
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [write("uncertain-write"), write("automatic-repeat"), createTextResponse({ text: "Repeated" })] });
+    await seedTokenModeConversation({ conversationId: "uncertain", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Uncertain", autoApproveWrites: true });
+    if (kind !== "new") await db.insert(messages).values([
+      { id: "uncertain-user", conversation_id: "uncertain", role: "user", content: "Original question", created_at: 1 },
+      { id: "original-answer", conversation_id: "uncertain", role: "assistant", content: "Original answer", created_at: 2 },
+    ]);
+    const before = await persistedUiMessages("uncertain");
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await realFetch(input, init);
+      if (String(input).startsWith(fakeMcp!.url) && String(init?.body).includes('"tools/call"')) {
+        await response.text();
+        throw new TypeError("Lost response after server commit");
+      }
+      return response;
+    });
+    const transport = new DefaultChatTransport({ api: "http://localhost/api/chat", body: { conversationId: "uncertain" }, fetch: async (input, init) => POST(new Request(String(input), init) as never) });
+    const chat = new Chat({ transport, messages: before });
+    if (kind === "regenerate") await chat.regenerate({ messageId: "original-answer" });
+    else if (kind === "edit") await chat.sendMessage({ messageId: "uncertain-user", text: "Create a different page" });
+    else await chat.sendMessage({ text: "Create a page" });
+    expect(chat.error).toBeUndefined();
+    expect(fakeMcp.toolCalls).toHaveLength(1);
+    expect(fakeModel.chatRequests).toHaveLength(1);
+    const saved = await persistedUiMessages("uncertain");
+    expect(saved.slice(0, before.length)).toEqual(before);
+    expect(saved.at(-1)?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ state: "output-available", output: expect.objectContaining({ isError: true, _meta: expect.objectContaining({ operation: "write", outcome: "unknown" }) }) })]));
+    for (const action of ["retry", "edit", "regenerate"]) {
+      const reloaded = new Chat({ transport, messages: saved });
+      if (action === "regenerate") await reloaded.regenerate({ messageId: saved.at(-1)?.id });
+      else await reloaded.sendMessage({ messageId: saved[0].id, parts: action === "retry" ? saved[0].parts : [{ type: "text", text: "Changed request" }] });
+      expect(reloaded.error?.message).toContain("new message");
+      expect(await persistedUiMessages("uncertain")).toEqual(saved);
+    }
+    const exported = await exportConversation(new Request("http://localhost/api/conversations/uncertain/export") as never, { params: Promise.resolve({ id: "uncertain" }) });
+    expect(await exported.text()).toContain("unknown");
+    expect(fakeMcp.toolCalls).toHaveLength(1);
+  });
+
   it.each(["new", "edit", "regenerate"])("preserves completed mutations after a failed %s turn and refuses destructive replay", async (kind) => {
     fakeMcp = await startFakeMcpServer();
     fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [
@@ -101,7 +209,7 @@ describe("chat route integration", () => {
     expect((await latestAssistantMessage("partial"))?.content).toBe("Partial answer");
   });
 
-  it.each(["reload approval", "mixed read approval", "denial"])("persists built-in MCP %s through the SDK and export", async (mode) => {
+  it.each(["reload approval", "mixed read approval", "denial", "uncertain", "missing output", "provider failure"])("persists built-in MCP %s through the SDK and export", async (mode) => {
     const includeRead = mode === "mixed read approval";
     const approved = mode !== "denial";
     fakeMcp = await startFakeMcpServer();
@@ -114,15 +222,11 @@ describe("chat route integration", () => {
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       if (!String(input).startsWith("https://api.openai.com/")) return realFetch(input, init);
       providerRequests.push(String(init?.body));
-      const item = providerRequests.length === 1
-        ? { type: "mcp_approval_request", id: "approval-item", server_label: "typo3", name: "WriteTable", arguments: JSON.stringify({ action: "create", table: "pages", data: { title: "Created" } }) }
-        : { type: "mcp_call", status: "completed", id: "completed-item", approval_request_id: "approval-item", server_label: "typo3", name: "WriteTable", arguments: JSON.stringify({ action: "create", table: "pages", data: { title: "Created" } }), output: JSON.stringify({ uid: 123 }), error: null };
+      if (mode === "provider failure") throw new TypeError("Lost provider response after approval");
+      const item = { type: "mcp_call", status: "completed", id: "completed-item", approval_request_id: "approval-item", server_label: "typo3", name: "WriteTable", arguments: JSON.stringify({ action: "create", table: "pages", data: { title: "Created" } }), output: mode === "uncertain" || mode === "missing output" ? null : JSON.stringify({ uid: 123 }), error: mode === "uncertain" ? "Connection lost" : null };
       const events = [
         { type: "response.created", response: { id: "resp_test", created_at: 1, model: "gpt-5.4-nano" } },
-        ...(includeRead && providerRequests.length === 1 ? [
-          { type: "response.output_item.done", output_index: 0, item: { type: "mcp_call", status: "completed", id: "completed-read", server_label: "typo3", name: "GetPageTree", arguments: "{}", output: JSON.stringify({ title: "Home" }), error: null } },
-        ] : []),
-        ...(approved || providerRequests.length === 1 ? [
+        ...(approved ? [
           { type: "response.output_item.added", output_index: 1, item },
           { type: "response.output_item.done", output_index: 1, item },
         ] : []),
@@ -131,33 +235,45 @@ describe("chat route integration", () => {
       return new Response(events.map((value) => `data: ${JSON.stringify(value)}\n\n`).join(""), { headers: { "Content-Type": "text/event-stream" } });
     });
     const transport = new DefaultChatTransport({ api: "http://localhost/api/chat", body: { conversationId: "dynamic" }, fetch: async (input, init) => POST(new Request(String(input), init) as never) });
-    const chat = new Chat({ transport });
-    await chat.sendMessage({ text: "Create a page" });
-    expect(chat.error).toBeUndefined();
+    const storedParts: UIMessage["parts"] = [
+      ...(includeRead ? [{ type: "dynamic-tool" as const, toolName: "mcp.GetPageTree", toolCallId: "completed-read", state: "output-available" as const, input: {}, output: { name: "GetPageTree", output: { title: "Home" } }, providerExecuted: true }] : []),
+      { type: "dynamic-tool", toolName: "mcp.WriteTable", toolCallId: "approval-item", state: "approval-requested", input: { action: "create", table: "pages", data: { title: "Created" } }, approval: { id: "approval-item" }, providerExecuted: true },
+    ];
+    await db.insert(messages).values([
+      { id: "native-user", conversation_id: "dynamic", role: "user", content: "Create a page", created_at: 1 },
+      { id: "native-assistant", conversation_id: "dynamic", role: "assistant", content: "", tool_calls: JSON.stringify(storedParts), created_at: 2 },
+    ]);
+    const chat = new Chat({ transport, messages: await persistedUiMessages("dynamic") });
     const pending = await persistedUiMessages("dynamic");
     expect(pending.at(-1)?.id).toBe(chat.lastMessage?.id);
     expect(pending.at(-1)?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "dynamic-tool", state: "approval-requested" })]));
     const reloaded = includeRead ? chat : new Chat({ transport, messages: pending });
     await reloaded.addToolApprovalResponse({ id: "approval-item", approved });
     await reloaded.sendMessage();
-    expect(reloaded.error).toBeUndefined();
+    if (mode === "provider failure") {
+      expect(reloaded.error).toBeDefined();
+      await vi.waitFor(async () => expect(JSON.stringify(await persistedUiMessages("dynamic"))).toContain('"outcome":"unknown"'));
+      expect(JSON.stringify(reloaded.lastMessage?.parts)).toContain('"outcome":"unknown"');
+    }
+    else expect(reloaded.error).toBeUndefined();
     const completed = await persistedUiMessages("dynamic");
     expect(completed).toHaveLength(2);
     expect(completed.at(-1)?.id).toBe(pending.at(-1)?.id);
-    expect(providerRequests[1]).toContain(`"approve":${approved}`);
+    expect(providerRequests[0]).toContain(`"approve":${approved}`);
+    expect(JSON.parse(providerRequests[0]).tools).toEqual([expect.objectContaining({ type: "mcp", require_approval: "always", allowed_tools: ["WriteTable"] })]);
     if (!approved) {
       expect(completed.at(-1)?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "dynamic-tool", approval: { id: "approval-item", approved: false } })]));
       expect(completed.at(-1)?.parts.some((part) => isToolUIPart(part) && part.state === "output-available")).toBe(false);
       return;
     }
-    expect(completed.at(-1)?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "dynamic-tool", state: "output-available", output: expect.objectContaining({ name: "WriteTable" }) })]));
+    expect(completed.at(-1)?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "dynamic-tool", state: "output-available", output: expect.objectContaining(mode === "provider failure" ? { _meta: { operation: "write", outcome: "unknown" } } : { name: "WriteTable" }) })]));
     const exported = await exportConversation(new Request("http://localhost/api/conversations/dynamic/export") as never, { params: Promise.resolve({ id: "dynamic" }) });
     const markdown = await exported.text();
     expect(markdown).toContain("WriteTable");
-    expect(markdown).toContain("123");
+    expect(markdown).toContain(["uncertain", "missing output", "provider failure"].includes(mode) ? "unknown" : "123");
     await reloaded.sendMessage({ messageId: completed[0].id, parts: completed[0].parts });
     expect(reloaded.error?.message).toContain("new message");
-    expect(providerRequests).toHaveLength(2);
+    expect(providerRequests).toHaveLength(1);
     expect(await persistedUiMessages("dynamic")).toEqual(completed);
   });
 

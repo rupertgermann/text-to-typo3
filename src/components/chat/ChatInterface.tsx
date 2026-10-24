@@ -48,6 +48,7 @@ import {
 } from "./chat-scroll";
 import { derivePendingApprovals } from "@/lib/pending-approvals";
 import { deriveQueuedWorkspaceChanges } from "./tool-rendering";
+import { UNKNOWN_WRITE_MESSAGE } from "@/lib/mcp-outcome";
 
 interface ChatInterfaceProps {
   initialAutoApproveWrites: boolean;
@@ -763,6 +764,7 @@ export function ChatInterface({
 }
 
 function getChatErrorDisplayMessage(error: Error): string {
+  if (error.message.includes(UNKNOWN_WRITE_MESSAGE)) return UNKNOWN_WRITE_MESSAGE;
   if (isTurnConflict(error)) {
     return error.message.includes('"completed_tool_results"')
       ? "Completed TYPO3 changes are saved. Continue with a new message."
