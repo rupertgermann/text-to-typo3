@@ -1,3 +1,4 @@
+import { deferred } from "@/test/deferred";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { createServer } from "node:http";
@@ -50,8 +51,8 @@ describe("model provider connection test route", () => {
     { stage: "body", stop: "request abort" },
   ])("aborts stalled $stage on $stop", async ({ stage, stop }) => {
     stubTokenAuthEnv();
-    const upstreamEntered = Promise.withResolvers<void>();
-    const bodyReading = Promise.withResolvers<void>();
+    const upstreamEntered = deferred<void>();
+    const bodyReading = deferred<void>();
     const readJson = Response.prototype.json;
     vi.spyOn(Response.prototype, "json").mockImplementation(function (this: Response) {
       if (this.url.endsWith("/v1/models")) bodyReading.resolve();

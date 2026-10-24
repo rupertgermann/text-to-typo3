@@ -1,3 +1,4 @@
+import { deferred } from "@/test/deferred";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { NextRequest } from "next/server";
@@ -98,8 +99,8 @@ describe("authentication concurrency", () => {
     await seedLocalTokenUser();
     await seedExpiredSession("first");
     await seedExpiredSession("second");
-    const firstResponse = Promise.withResolvers<Response>();
-    const firstEntered = Promise.withResolvers<void>();
+    const firstResponse = deferred<Response>();
+    const firstEntered = deferred<void>();
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (_input, init) => {
       if (new URLSearchParams(String(init?.body)).get("refresh_token") === "refresh-first") {
         firstEntered.resolve();

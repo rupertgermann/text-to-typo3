@@ -1,3 +1,4 @@
+import { deferred } from "@/test/deferred";
 import { Children, isValidElement, type DependencyList, type EffectCallback, type ReactNode, type SetStateAction } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PublicUserSettings } from "@/lib/user-settings";
@@ -47,12 +48,7 @@ const saved: PublicUserSettings = {
   customProviders: [{ id: "provider", displayName: "Saved provider",
     baseUrl: "http://saved-provider.local/v1", hasApiKey: true }],
 };
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: Error) => void;
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
+
 let useSettingsForm: typeof import("./use-settings-form").useSettingsForm;
 let SettingsModal: typeof import("./settings-modal").SettingsModal;
 let request: ReturnType<typeof deferred<Response>>;

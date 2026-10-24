@@ -1,3 +1,4 @@
+import { deferred } from "@/test/deferred";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { asc, eq } from "drizzle-orm";
 import { DefaultChatTransport, isToolUIPart, type UIMessage } from "ai";
@@ -205,8 +206,8 @@ describe("chat route integration", () => {
     fakeMcp = await startFakeMcpServer();
     fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [createTextResponse({ text: "First" }), createTextResponse({ text: "Later" })] });
     await seedTokenModeConversation({ conversationId: "persist-lock", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Lock" });
-    const entered = Promise.withResolvers<void>();
-    const resume = Promise.withResolvers<void>();
+    const entered = deferred<void>();
+    const resume = deferred<void>();
     const persist = chatPersistence.persistResponseMessage;
     vi.spyOn(chatPersistence, "persistResponseMessage").mockImplementationOnce(async (input) => {
       entered.resolve();
@@ -231,8 +232,8 @@ describe("chat route integration", () => {
     fakeMcp = await startFakeMcpServer();
     fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [createTextResponse({ text: "Completed in background" }), createTextResponse({ text: "Later" })] });
     await seedTokenModeConversation({ conversationId: "abort-lock", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Abort" });
-    const entered = Promise.withResolvers<void>();
-    const resume = Promise.withResolvers<void>();
+    const entered = deferred<void>();
+    const resume = deferred<void>();
     const realFetch = globalThis.fetch;
     let intercept = true;
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
