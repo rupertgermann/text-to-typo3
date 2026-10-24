@@ -40,6 +40,7 @@ type McpToolResult = {
 };
 
 type CachedToolSet = {
+  accessToken: string;
   fetchedAt: number;
   requireWriteApproval: boolean;
   tools: ToolSet;
@@ -417,7 +418,10 @@ export async function getMcpTools({
   const cached = toolCache.get(toolCacheKey);
   const now = Date.now();
 
-  if (
+  if (cached && cached.accessToken !== accessToken) {
+    toolCache.delete(toolCacheKey);
+    mcpSessionCache.delete(sessionId);
+  } else if (
     cached?.requireWriteApproval !== undefined &&
     cached.requireWriteApproval !== requireWriteApproval
   ) {
@@ -518,7 +522,7 @@ export async function getMcpTools({
     }),
   );
 
-  toolCache.set(toolCacheKey, { fetchedAt: now, requireWriteApproval, tools });
+  toolCache.set(toolCacheKey, { accessToken, fetchedAt: now, requireWriteApproval, tools });
   return tools;
 }
 

@@ -1,10 +1,13 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { isDeepStrictEqual } from "node:util";
+import { and, asc, eq } from "drizzle-orm";
 import { isToolUIPart, type UIMessage } from "ai";
 import { db } from "@/lib/db";
 import { conversations, messages, type Conversation } from "@/lib/db/schema";
 import {
+  deserializeMessageParts,
   extractMessageText,
   hasFileParts,
+  sanitizeMessageParts,
   serializeMessageParts,
 } from "@/lib/chat-message-parts";
 
@@ -22,8 +25,13 @@ export class ChatTurnResolutionError extends Error {
 
 export interface ChatTurnResolution {
   continuationAssistantMessageId: string | null;
+  claimApproval: (() => void) | null;
   conversation: Conversation;
   userText: string;
+  historyChange: {
+    removeMessageIds: string[];
+    userMessage: UIMessage | null;
+  } | null;
 }
 
 function hasApprovalResponseParts(message: UIMessage): boolean {
@@ -62,20 +70,21 @@ export async function resolveChatTurn({
   const lastMessage = uiMessages.at(-1);
 
   if (trigger === "regenerate-message") {
-    const userText = await resolveRegenerationTurn({
+    const resolved = await resolveRegenerationTurn({
       conversationId,
       messageId,
     });
 
     return {
       continuationAssistantMessageId: null,
+      claimApproval: null,
       conversation,
-      userText,
+      ...resolved,
     };
   }
 
   if (lastMessage && hasApprovalResponseParts(lastMessage)) {
-    const { continuationAssistantMessageId, userText } =
+    const { continuationAssistantMessageId, claimApproval, userText } =
       await resolveApprovalContinuationTurn({
         conversationId,
         lastMessage,
@@ -84,12 +93,14 @@ export async function resolveChatTurn({
 
     return {
       continuationAssistantMessageId,
+      claimApproval,
       conversation,
       userText,
+      historyChange: null,
     };
   }
 
-  const userText = await resolveSubmitTurn({
+  const resolved = await resolveSubmitTurn({
     conversationId,
     lastMessage,
     messageId,
@@ -97,8 +108,9 @@ export async function resolveChatTurn({
 
   return {
     continuationAssistantMessageId: null,
+    claimApproval: null,
     conversation,
-    userText,
+    ...resolved,
   };
 }
 
@@ -108,7 +120,7 @@ async function resolveRegenerationTurn({
 }: {
   conversationId: string;
   messageId?: string;
-}): Promise<string> {
+}): Promise<Pick<ChatTurnResolution, "userText" | "historyChange">> {
   const existingMessages = await orderedConversationMessages(conversationId);
   const latestAssistantIndex = existingMessages.findLastIndex(
     (message) => message.role === "assistant",
@@ -140,11 +152,13 @@ async function resolveRegenerationTurn({
     );
   }
 
-  await db
-    .delete(messages)
-    .where(eq(messages.id, existingMessages[targetAssistantIndex].id));
-
-  return precedingUserMessage.content;
+  return {
+    userText: precedingUserMessage.content,
+    historyChange: {
+      removeMessageIds: [existingMessages[targetAssistantIndex].id],
+      userMessage: null,
+    },
+  };
 }
 
 async function resolveApprovalContinuationTurn({
@@ -155,7 +169,11 @@ async function resolveApprovalContinuationTurn({
   conversationId: string;
   lastMessage: UIMessage;
   messageId?: string;
-}): Promise<{ continuationAssistantMessageId: string; userText: string }> {
+}): Promise<{
+  continuationAssistantMessageId: string;
+  claimApproval: () => void;
+  userText: string;
+}> {
   const existingMessages = await orderedConversationMessages(conversationId);
   const targetMessageId = messageId ?? lastMessage.id;
   const currentMessageIndex = existingMessages.findIndex(
@@ -187,16 +205,80 @@ async function resolveApprovalContinuationTurn({
     );
   }
 
-  await db
-    .update(messages)
-    .set({
-      content: extractMessageText(lastMessage.parts),
-      tool_calls: serializeMessageParts(lastMessage.parts),
-    })
-    .where(eq(messages.id, targetMessageId));
+  const currentMessage = existingMessages[currentMessageIndex];
+  const storedParts = deserializeMessageParts(currentMessage.tool_calls) ?? [];
+  const submittedParts = sanitizeMessageParts(lastMessage.parts);
+  let decisionCount = 0;
+  const approvedParts = storedParts.map((part) => {
+    if (!isToolUIPart(part) || part.state !== "approval-requested") return part;
+    const decision = submittedParts.find(
+      (candidate) =>
+        isToolUIPart(candidate) && candidate.toolCallId === part.toolCallId,
+    );
+    if (
+      !decision ||
+      !isToolUIPart(decision) ||
+      decision.state !== "approval-responded"
+    ) {
+      return part;
+    }
+    if (
+      decision.approval?.id !== part.approval.id ||
+      typeof decision.approval.approved !== "boolean" ||
+      (decision.approval.reason !== undefined &&
+        typeof decision.approval.reason !== "string")
+    ) {
+      throw new ChatTurnResolutionError("Invalid approval decision", 400);
+    }
+    decisionCount += 1;
+    return {
+      ...part,
+      state: "approval-responded" as const,
+      approval: {
+        id: part.approval.id,
+        approved: decision.approval.approved,
+        ...(decision.approval.reason !== undefined
+          ? { reason: decision.approval.reason }
+          : {}),
+      },
+    };
+  });
+
+  if (
+    lastMessage.id !== targetMessageId ||
+    decisionCount === 0 ||
+    storedParts.some(
+      (part) => isToolUIPart(part) && part.state === "approval-responded",
+    ) ||
+    approvedParts.some(
+      (part) => isToolUIPart(part) && part.state === "approval-requested",
+    ) ||
+    !isDeepStrictEqual(approvedParts, submittedParts)
+  ) {
+    throw new ChatTurnResolutionError(
+      "Approval does not match a pending tool call",
+      400,
+    );
+  }
 
   return {
     continuationAssistantMessageId: targetMessageId,
+    claimApproval: () => {
+      const claimed = db
+        .update(messages)
+        .set({ tool_calls: serializeMessageParts(approvedParts) })
+        .where(
+          and(
+            eq(messages.id, targetMessageId),
+            eq(messages.conversation_id, conversationId),
+            eq(messages.tool_calls, currentMessage.tool_calls ?? ""),
+          ),
+        )
+        .run();
+      if (claimed.changes !== 1) {
+        throw new ChatTurnResolutionError("Approval has already been handled", 400);
+      }
+    },
     userText: precedingUserMessage.content,
   };
 }
@@ -209,7 +291,7 @@ async function resolveSubmitTurn({
   conversationId: string;
   lastMessage: UIMessage | undefined;
   messageId?: string;
-}): Promise<string> {
+}): Promise<Pick<ChatTurnResolution, "userText" | "historyChange">> {
   const userText = lastMessage ? extractMessageText(lastMessage.parts) : "";
 
   if (
@@ -243,29 +325,34 @@ async function resolveSubmitTurn({
       .slice(currentMessageIndex + 1)
       .map((message) => message.id);
 
-    if (trailingMessageIds.length > 0) {
-      await db.delete(messages).where(inArray(messages.id, trailingMessageIds));
-    }
-
-    await db
-      .update(messages)
-      .set({
-        content: userText,
-        tool_calls: persistedParts,
-      })
-      .where(eq(messages.id, messageId));
-
-    return userText;
+    return {
+      userText,
+      historyChange: {
+        removeMessageIds: trailingMessageIds,
+        userMessage: { ...lastMessage, id: messageId },
+      },
+    };
   }
 
-  await db.insert(messages).values({
-    conversation_id: conversationId,
-    role: "user",
-    content: userText,
-    tool_calls: persistedParts,
-  });
+  if (!lastMessage.id || typeof lastMessage.id !== "string") {
+    throw new ChatTurnResolutionError("Message ID is required", 400);
+  }
+  const inserted = await db
+    .insert(messages)
+    .values({
+      id: lastMessage.id,
+      conversation_id: conversationId,
+      role: "user",
+      content: userText,
+      tool_calls: persistedParts,
+    })
+    .onConflictDoNothing()
+    .returning({ id: messages.id });
+  if (inserted.length !== 1) {
+    throw new ChatTurnResolutionError("Message ID already exists", 400);
+  }
 
-  return userText;
+  return { userText, historyChange: null };
 }
 
 function orderedConversationMessages(conversationId: string) {

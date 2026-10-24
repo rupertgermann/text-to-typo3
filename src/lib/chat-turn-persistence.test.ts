@@ -30,6 +30,7 @@ describe("chat turn persistence", () => {
     const conversation = await seedConversation("insert-conversation", "Work");
 
     await persistChatTurn({
+      assistantMessageId: "response-id",
       assistantText: "Done.",
       continuationAssistantMessageId: null,
       conversation,
@@ -40,6 +41,7 @@ describe("chat turn persistence", () => {
 
     const assistant = await latestAssistant("insert-conversation");
 
+    expect(assistant?.id).toBe("response-id");
     expect(assistant?.content).toBe("Done.");
     expect(assistant?.input_tokens).toBe(7);
     expect(assistant?.output_tokens).toBe(2);
@@ -56,6 +58,7 @@ describe("chat turn persistence", () => {
     });
 
     await persistChatTurn({
+      assistantMessageId: "response-id",
       assistantText: "Approved write completed.",
       continuationAssistantMessageId: "continued-assistant",
       conversation,
@@ -80,6 +83,7 @@ describe("chat turn persistence", () => {
     const conversation = await seedConversation("title-conversation", "New conversation");
 
     const { titleGeneration } = await persistChatTurn({
+      assistantMessageId: "response-id",
       assistantText: "I can help with that.",
       continuationAssistantMessageId: null,
       conversation,

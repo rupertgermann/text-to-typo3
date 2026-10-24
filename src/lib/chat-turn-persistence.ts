@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import type { LanguageModel, UIMessage } from "ai";
 import { generateText } from "ai";
 import { db } from "@/lib/db";
@@ -7,6 +7,7 @@ import {
   extractMessageText,
   serializeMessageParts,
 } from "@/lib/chat-message-parts";
+import type { ChatTurnResolution } from "@/lib/chat-turn-resolution";
 
 export type TitleGenerator = (input: {
   assistantText: string;
@@ -54,7 +55,9 @@ export function createModelTitleGenerator(model: LanguageModel): TitleGenerator 
 }
 
 export async function persistChatTurn({
+  assistantMessageId,
   assistantText,
+  historyChange = null,
   continuationAssistantMessageId,
   conversation,
   responseParts,
@@ -62,7 +65,9 @@ export async function persistChatTurn({
   tokenUsage,
   userText,
 }: {
+  assistantMessageId: string;
   assistantText: string;
+  historyChange?: ChatTurnResolution["historyChange"];
   continuationAssistantMessageId: string | null;
   conversation: Conversation;
   responseParts: UIMessage["parts"];
@@ -81,18 +86,74 @@ export async function persistChatTurn({
       output_tokens: tokenUsage.outputTokens,
     };
 
-    if (continuationAssistantMessageId) {
-      await db
-        .update(messages)
-        .set(assistantMessageValues)
-        .where(eq(messages.id, continuationAssistantMessageId));
-    } else {
-      await db.insert(messages).values({
-        conversation_id: conversation.id,
-        role: "assistant",
-        ...assistantMessageValues,
-      });
-    }
+    db.transaction((tx) => {
+      if (historyChange) {
+        const latestMessage = tx
+          .select({ id: messages.id })
+          .from(messages)
+          .where(eq(messages.conversation_id, conversation.id))
+          .orderBy(asc(messages.created_at))
+          .all()
+          .at(-1);
+        const expectedLastId =
+          historyChange.removeMessageIds.at(-1) ?? historyChange.userMessage?.id;
+        if (latestMessage?.id !== expectedLastId) {
+          throw new Error(
+            "Conversation changed while generating the replacement. Retry the turn.",
+          );
+        }
+        if (historyChange.removeMessageIds.length > 0) {
+          const removed = tx
+            .delete(messages)
+            .where(
+              and(
+                eq(messages.conversation_id, conversation.id),
+                inArray(messages.id, historyChange.removeMessageIds),
+              ),
+            )
+            .run();
+          if (removed.changes !== historyChange.removeMessageIds.length) {
+            throw new Error(
+              "Conversation changed while generating the replacement. Retry the turn.",
+            );
+          }
+        }
+        if (historyChange.userMessage) {
+          tx.update(messages)
+            .set({
+              content: extractMessageText(historyChange.userMessage.parts),
+              tool_calls: serializeMessageParts(historyChange.userMessage.parts),
+            })
+            .where(
+              and(
+                eq(messages.id, historyChange.userMessage.id),
+                eq(messages.conversation_id, conversation.id),
+              ),
+            )
+            .run();
+        }
+      }
+      if (continuationAssistantMessageId) {
+        tx.update(messages)
+          .set(assistantMessageValues)
+          .where(
+            and(
+              eq(messages.id, continuationAssistantMessageId),
+              eq(messages.conversation_id, conversation.id),
+            ),
+          )
+          .run();
+      } else {
+        tx.insert(messages)
+          .values({
+            id: assistantMessageId,
+            conversation_id: conversation.id,
+            role: "assistant",
+            ...assistantMessageValues,
+          })
+          .run();
+      }
+    });
   }
 
   if (/^new conversation$/i.test(conversation.title) && userText.trim()) {
@@ -127,6 +188,7 @@ export async function persistChatTurn({
 }
 
 export async function persistResponseMessage({
+  historyChange,
   continuationAssistantMessageId,
   conversation,
   responseMessage,
@@ -137,11 +199,14 @@ export async function persistResponseMessage({
   continuationAssistantMessageId: string | null;
   conversation: Conversation;
   responseMessage: UIMessage;
+  historyChange?: ChatTurnResolution["historyChange"];
   titleGenerator?: TitleGenerator;
   tokenUsage: { inputTokens: number | null; outputTokens: number | null };
   userText: string;
 }): Promise<{ titleGeneration: Promise<void> | null }> {
   return persistChatTurn({
+    assistantMessageId: responseMessage.id,
+    historyChange,
     assistantText: extractMessageText(responseMessage.parts),
     continuationAssistantMessageId,
     conversation,

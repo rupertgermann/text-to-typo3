@@ -157,6 +157,20 @@ async function writeFileIfChanged(filePath, content) {
   return true;
 }
 
+async function writeScaffoldEnvFile(filePath, content) {
+  let merged = (await fileExists(filePath)) ? await readFile(filePath, "utf8") : "";
+  for (const assignment of content.split("\n")) {
+    const key = assignment.slice(0, assignment.indexOf("="));
+    const pattern = new RegExp(`^([\\t ]*(?:export[\\t ]+)?)${key}[\\t ]*=.*$`, "gm");
+    if (pattern.test(merged)) {
+      merged = merged.replace(pattern, (_line, prefix) => `${prefix}${assignment}`);
+    } else {
+      merged += `${merged && !merged.endsWith("\n") ? "\n" : ""}${assignment}\n`;
+    }
+  }
+  return writeFileIfChanged(filePath, merged);
+}
+
 function resolveProjectName(instanceDir, overrideName) {
   if (overrideName) return overrideName;
   const base = path.basename(path.resolve(instanceDir));
@@ -507,7 +521,7 @@ async function main() {
 
     if (existing.version >= SCAFFOLD_STATE_VERSION) {
       if (existing.envFile && !(await fileExists(envPath))) {
-        await writeFileIfChanged(envPath, existing.envFile);
+        await writeScaffoldEnvFile(envPath, existing.envFile);
       }
       if (existing.summaryMarkdown && !(await fileExists(summaryPath))) {
         await writeFileIfChanged(summaryPath, existing.summaryMarkdown);
@@ -536,8 +550,10 @@ async function main() {
   }
 
   const plan = buildPlan(config);
-  await ensureDir(instanceDir);
-  await ensureDir(path.join(instanceDir, ".codex-scaffold"));
+  if (!config.dryRun) {
+    await ensureDir(instanceDir);
+    await ensureDir(path.join(instanceDir, ".codex-scaffold"));
+  }
 
   console.log(`Scaffolding TYPO3 instance in ${instanceDir}`);
   console.log(`Project name: ${config.projectName}`);
@@ -558,7 +574,11 @@ async function main() {
       if (config.dryRun) {
         continue;
       }
-      await writeFileIfChanged(targetPath, step.content);
+      if (targetPath === envPath) {
+        await writeScaffoldEnvFile(targetPath, step.content);
+      } else {
+        await writeFileIfChanged(targetPath, step.content);
+      }
       continue;
     }
 
@@ -593,10 +613,6 @@ async function main() {
     console.log(`Planned .env.local path: ${envPath}`);
     console.log(`Planned TYPO3 backend URL: ${plan.backendUrl}`);
     return;
-  }
-
-  if (config.force || !(await fileExists(envPath))) {
-    await writeFileIfChanged(envPath, plan.envFile);
   }
 
   await writeFileIfChanged(summaryPath, plan.summaryMarkdown);

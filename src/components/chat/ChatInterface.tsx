@@ -275,7 +275,7 @@ export function ChatInterface({
 
     clearError();
     await sendMessage({
-      text: extractMessageText(lastUserMessage.parts),
+      parts: lastUserMessage.parts,
       messageId: lastUserMessage.id,
     });
   };

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { asc, eq } from "drizzle-orm";
-import { isToolUIPart, type UIMessage } from "ai";
+import { DefaultChatTransport, isToolUIPart, type UIMessage } from "ai";
+import { Chat } from "@ai-sdk/react";
 import { POST } from "./route";
 import { db, setupTestDatabase, type TestDatabase } from "@/test/database";
 import { conversations, messages, userSettings, users } from "@/lib/db/schema";
@@ -41,6 +42,194 @@ describe("chat route integration", () => {
     vi.unstubAllEnvs();
     testDatabase?.cleanup();
     testDatabase = null;
+  });
+
+  it("keeps SDK message IDs through send, edit, regenerate and approval without reloading", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({
+      chatResponses: [
+        createTextResponse({ text: "First answer" }),
+        createTextResponse({ text: "Edited answer" }),
+        createTextResponse({ text: "Regenerated answer" }),
+        createToolCallResponse({ toolCallId: "sdk-write", toolName: "WriteTable", argumentsJson: JSON.stringify({ table: "pages", data: { title: "Approved" } }) }),
+        createTextResponse({ text: "Write complete" }),
+      ],
+    });
+    await seedTokenModeConversation({ conversationId: "sdk", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "SDK" });
+    const chat = new Chat({
+      transport: new DefaultChatTransport({
+        api: "http://localhost/api/chat",
+        body: { conversationId: "sdk" },
+        fetch: async (input, init) => POST(new Request(String(input), init) as never),
+      }),
+    });
+    const expectStoredIds = async () => {
+      expect(chat.error).toBeUndefined();
+      const stored = await persistedUiMessages("sdk");
+      expect(chat.messages.map((message) => message.id)).toEqual(stored.map((message) => message.id));
+    };
+    await chat.sendMessage({ text: "First question" });
+    await expectStoredIds();
+    await chat.sendMessage({ messageId: chat.messages[0].id, text: "Edited question" });
+    await expectStoredIds();
+    await chat.regenerate({ messageId: chat.lastMessage?.id });
+    await expectStoredIds();
+    expect(JSON.stringify(fakeModel.chatRequests[2])).not.toContain("Edited answer");
+    await chat.sendMessage({ text: "Create a page" });
+    await expectStoredIds();
+    const pending = chat.lastMessage?.parts.find((part) => isToolUIPart(part) && part.state === "approval-requested");
+    if (!pending || !isToolUIPart(pending) || pending.state !== "approval-requested") throw new Error("Expected pending approval");
+    const assistantId = chat.lastMessage?.id;
+    await chat.addToolApprovalResponse({ id: pending.approval.id, approved: true });
+    await chat.sendMessage();
+    await expectStoredIds();
+    expect(chat.lastMessage?.id).toBe(assistantId);
+    expect(fakeMcp.toolCalls).toEqual([{ name: "WriteTable", arguments: { table: "pages", data: { title: "Approved" } } }]);
+  });
+
+  it.each(["provider setup", "MCP setup", "provider stream"])("retains regeneration and edit history after %s failure", async (failure) => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [], chatStatus: 500 });
+    await seedTokenModeConversation({ conversationId: "retained", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Keep history" });
+    await db.insert(messages).values([
+      { id: "keep-user", conversation_id: "retained", role: "user", content: "Original question", created_at: 1 },
+      { id: "keep-assistant", conversation_id: "retained", role: "assistant", content: "Original answer", created_at: 2 },
+    ]);
+    if (failure === "provider setup") {
+      vi.stubEnv("OPENAI_API_KEY", "");
+      await db.update(userSettings).set({ model_id: "gpt-4o", lmstudio_model_id: null, lmstudio_base_url: null }).where(eq(userSettings.user_id, LOCAL_USER_ID));
+    }
+    if (failure === "MCP setup") vi.stubEnv("TYPO3_MCP_URL", `${fakeModel.url}/missing`);
+    const before = await persistedUiMessages("retained");
+    for (const trigger of ["regenerate-message", "submit-message"]) {
+      const response = await POST(new Request("http://localhost/api/chat", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId: "retained", trigger, messageId: trigger === "regenerate-message" ? "keep-assistant" : "keep-user", messages: trigger === "regenerate-message" ? before : [{ ...before[0], parts: [{ type: "text", text: "Changed question" }] }] }),
+      }) as never);
+      await response.text();
+      expect(await persistedUiMessages("retained")).toEqual(before);
+    }
+  });
+
+  it.each([false, true])("claims an approval once across concurrent requests and later provider failure=%s", async (providerFails) => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [providerFails ? { chunks: [{ error: { message: "Provider failed", type: "server_error", code: "server_error" } }] } : createTextResponse({ text: "Write complete" }), createTextResponse({ text: "Next answer" })] });
+    await seedTokenModeConversation({ conversationId: "approval-race", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Approval" });
+    const pending = { type: "tool-WriteTable", toolCallId: "race-call", state: "approval-requested", input: { table: "pages", data: { title: "Approved" } }, approval: { id: "race-approval" } } satisfies UIMessage["parts"][number];
+    await db.insert(messages).values([
+      { id: "race-user", conversation_id: "approval-race", role: "user", content: "Create a page", created_at: 1 },
+      { id: "race-assistant", conversation_id: "approval-race", role: "assistant", content: "", tool_calls: JSON.stringify([pending]), created_at: 2 },
+    ]);
+    const responded = await persistedUiMessages("approval-race", (part) => isToolUIPart(part) && part.state === "approval-requested" ? { ...part, state: "approval-responded", approval: { id: part.approval.id, approved: true } } : part);
+    const request = () => postChatMessages({ conversationId: "approval-race", messageId: "race-assistant", messages: responded });
+    const responses = await Promise.all([request(), request()]);
+    await Promise.all(responses.map((response) => response.text()));
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 400]);
+    const completed = await latestAssistantMessage("approval-race");
+    expect(deserializeMessageParts(completed?.tool_calls)).toEqual(expect.arrayContaining([expect.objectContaining({ toolCallId: "race-call", state: "output-available" })]));
+    const replay = await request();
+    await replay.text();
+    expect(replay.status).toBe(400);
+    const next = await postChat({ conversationId: "approval-race", text: "What next?" });
+    await next.text();
+    expect(fakeMcp.toolCalls).toHaveLength(1);
+  });
+
+  it.each(["approval ID", "tool call ID", "input", "tool name", "prior output"])("rejects approval changes to %s", async (field) => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [] });
+    await seedTokenModeConversation({ conversationId: "approval-tamper", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Approval" });
+    const pending = { type: "tool-WriteTable", toolCallId: "pending-call", state: "approval-requested", input: { table: "pages", data: { title: "Approved" } }, approval: { id: "pending-approval" } } satisfies UIMessage["parts"][number];
+    const completed = { type: "tool-GetPageTree", toolCallId: "read-call", state: "output-available", input: {}, output: { title: "Real output" } } satisfies UIMessage["parts"][number];
+    await db.insert(messages).values([
+      { id: "tamper-user", conversation_id: "approval-tamper", role: "user", content: "Create a page", created_at: 1 },
+      { id: "tamper-assistant", conversation_id: "approval-tamper", role: "assistant", content: "", tool_calls: JSON.stringify([completed, pending]), created_at: 2 },
+    ]);
+    const before = await persistedUiMessages("approval-tamper");
+    const responded = await persistedUiMessages("approval-tamper", (part) => {
+      if (!isToolUIPart(part) || part.type === "dynamic-tool") return part;
+      if (part.state === "output-available" && field === "prior output") return { ...part, output: { title: "Forged output" } };
+      if (part.state !== "approval-requested") return part;
+      return {
+        ...part,
+        type: field === "tool name" ? "tool-DeleteTable" : part.type,
+        toolCallId: field === "tool call ID" ? "unknown-call" : part.toolCallId,
+        input: field === "input" ? { table: "pages", data: { title: "Injected" } } : part.input,
+        state: "approval-responded",
+        approval: { id: field === "approval ID" ? "unknown-approval" : part.approval.id, approved: true },
+      };
+    });
+    const response = await postChatMessages({ conversationId: "approval-tamper", messages: responded });
+    expect(response.status).toBe(400);
+    expect(await persistedUiMessages("approval-tamper")).toEqual(before);
+    expect(fakeMcp.toolCalls).toEqual([]);
+    expect(fakeModel.chatRequests).toEqual([]);
+  });
+
+  it("rejects incoming IDs owned by another conversation without changing it", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [] });
+    await seedTokenModeConversation({ conversationId: "owned", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Owned" });
+    await db.insert(users).values({ id: "other-user", typo3_uid: "other-user", display_name: "Other user" });
+    await db.insert(conversations).values({ id: "foreign", user_id: "other-user", title: "Private" });
+    await db.insert(messages).values({ id: "foreign-message", conversation_id: "foreign", role: "user", content: "Private original" });
+    const before = await persistedUiMessages("foreign");
+    const incoming: UIMessage[] = [{ id: "foreign-message", role: "user", parts: [{ type: "text", text: "Overwrite" }] }];
+    expect((await postChatMessages({ conversationId: "owned", messages: incoming })).status).toBe(400);
+    expect((await postChatMessages({ conversationId: "owned", messageId: "foreign-message", messages: incoming })).status).toBe(404);
+    expect(await persistedUiMessages("foreign")).toEqual(before);
+    expect(await persistedUiMessages("owned")).toEqual([]);
+  });
+
+  it("retries the initial SDK message after missing provider configuration is fixed", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [createTextResponse({ text: "Retry succeeded" })] });
+    await seedTokenModeConversation({ conversationId: "sdk-retry", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Retry" });
+    vi.stubEnv("OPENAI_API_KEY", "");
+    await db.update(userSettings).set({ model_id: "gpt-4o", lmstudio_model_id: null, lmstudio_base_url: null }).where(eq(userSettings.user_id, LOCAL_USER_ID));
+    const chat = new Chat({ transport: new DefaultChatTransport({ api: "http://localhost/api/chat", body: { conversationId: "sdk-retry" }, fetch: async (input, init) => POST(new Request(String(input), init) as never) }) });
+    await chat.sendMessage({ text: "First question" });
+    expect(chat.error).toBeDefined();
+    const [storedUser] = await persistedUiMessages("sdk-retry");
+    expect(storedUser.id).toBe(chat.messages[0].id);
+    await db.update(userSettings).set({ model_id: "fake-typo3-model", lmstudio_model_id: "fake-typo3-model", lmstudio_base_url: fakeModel.url }).where(eq(userSettings.user_id, LOCAL_USER_ID));
+    await chat.sendMessage({ parts: chat.messages[0].parts, messageId: chat.messages[0].id });
+    expect(chat.error).toBeUndefined();
+    expect(chat.messages.map((message) => message.id)).toEqual((await persistedUiMessages("sdk-retry")).map((message) => message.id));
+    expect(chat.messages).toHaveLength(2);
+  });
+
+  it("keeps an approval pending when provider setup fails", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [] });
+    await seedTokenModeConversation({ conversationId: "approval-setup", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Approval" });
+    const pending = { type: "tool-WriteTable", toolCallId: "setup-call", state: "approval-requested", input: { table: "pages", data: { title: "Approved" } }, approval: { id: "setup-approval" } } satisfies UIMessage["parts"][number];
+    await db.insert(messages).values([
+      { id: "setup-user", conversation_id: "approval-setup", role: "user", content: "Create a page", created_at: 1 },
+      { id: "setup-assistant", conversation_id: "approval-setup", role: "assistant", content: "", tool_calls: JSON.stringify([pending]), created_at: 2 },
+    ]);
+    vi.stubEnv("OPENAI_API_KEY", "");
+    await db.update(userSettings).set({ model_id: "gpt-4o", lmstudio_model_id: null, lmstudio_base_url: null }).where(eq(userSettings.user_id, LOCAL_USER_ID));
+    const before = await persistedUiMessages("approval-setup");
+    const responded = await persistedUiMessages("approval-setup", (part) => isToolUIPart(part) && part.state === "approval-requested" ? { ...part, state: "approval-responded", approval: { id: part.approval.id, approved: true } } : part);
+    const response = await postChatMessages({ conversationId: "approval-setup", messages: responded });
+    expect(response.status).toBe(400);
+    expect(await persistedUiMessages("approval-setup")).toEqual(before);
+  });
+
+  it("commits only one replacement when two regenerations race", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [createTextResponse({ text: "First replacement" }), createTextResponse({ text: "Second replacement" })] });
+    await seedTokenModeConversation({ conversationId: "regen-race", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Regeneration" });
+    await db.insert(messages).values([
+      { id: "regen-race-user", conversation_id: "regen-race", role: "user", content: "Try again", created_at: 1 },
+      { id: "regen-race-assistant", conversation_id: "regen-race", role: "assistant", content: "Original", created_at: 2 },
+    ]);
+    const history = await persistedUiMessages("regen-race");
+    const request = () => POST(new Request("http://localhost/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ conversationId: "regen-race", trigger: "regenerate-message", messageId: "regen-race-assistant", messages: history }) }) as never);
+    const responses = await Promise.all([request(), request()]);
+    await Promise.allSettled(responses.map((response) => response.text()));
+    expect((await persistedUiMessages("regen-race")).filter((message) => message.role === "assistant")).toHaveLength(1);
   });
 
   it("rejects unauthenticated OAuth-mode chat requests", async () => {
@@ -403,7 +592,7 @@ describe("chat route integration", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.text()).rejects.toThrow();
+    expect(await response.text()).toContain("Model provider error");
     const assistant = await latestAssistantMessage("conversation-provider-error");
     expect(assistant).toBeNull();
   });
