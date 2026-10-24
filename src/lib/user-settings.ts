@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { userSettings } from "@/lib/db/schema";
+import { userSettings, type UserSettings } from "@/lib/db/schema";
 import { encrypt, decrypt } from "@/lib/crypto";
 import { getEnv } from "@/lib/env";
 
@@ -300,71 +300,105 @@ export async function upsertUserSettings(
   userId: string,
   input: UserSettingsInput,
 ): Promise<PublicUserSettings> {
-  const existing = await getUserSettingsRow(userId);
-  const normalizedOpenAiApiKey =
-    input.openaiApiKey === undefined
-      ? undefined
-      : normalizeNullableString(input.openaiApiKey);
+  return db.transaction((tx) => {
+    const existing = tx
+      .select()
+      .from(userSettings)
+      .where(eq(userSettings.user_id, userId))
+      .get();
+    const normalizedOpenAiApiKey =
+      input.openaiApiKey === undefined
+        ? undefined
+        : normalizeNullableString(input.openaiApiKey);
 
-  const nextModelId =
-    input.modelId === undefined
-      ? existing?.model_id ?? null
-      : normalizeNullableString(input.modelId);
-  const nextModelContextWindow =
-    input.modelContextWindow === undefined
-      ? existing?.model_context_window ?? null
-      : normalizeContextWindow(input.modelContextWindow);
-  const nextLmStudioBaseUrl =
-    input.lmstudioBaseUrl === undefined
-      ? existing?.lmstudio_base_url ?? null
-      : normalizeBaseUrl(input.lmstudioBaseUrl);
-  const nextLmStudioModelId =
-    input.lmstudioModelId === undefined
-      ? existing?.lmstudio_model_id ?? null
-      : normalizeNullableString(input.lmstudioModelId);
-  const nextCustomProviders = normalizeCustomProviders(
-    input.customProviders,
-    existing?.custom_providers,
-  );
-  const nextOpenAiApiKey =
-    normalizedOpenAiApiKey === undefined
-      ? existing?.openai_api_key ?? null
-      : normalizedOpenAiApiKey
-        ? encrypt(normalizedOpenAiApiKey)
-        : null;
+    const nextModelId =
+      input.modelId === undefined
+        ? existing?.model_id ?? null
+        : normalizeNullableString(input.modelId);
+    const nextModelContextWindow =
+      input.modelContextWindow === undefined
+        ? existing?.model_context_window ?? null
+        : normalizeContextWindow(input.modelContextWindow);
+    const nextLmStudioBaseUrl =
+      input.lmstudioBaseUrl === undefined
+        ? existing?.lmstudio_base_url ?? null
+        : normalizeBaseUrl(input.lmstudioBaseUrl);
+    const nextLmStudioModelId =
+      input.lmstudioModelId === undefined
+        ? existing?.lmstudio_model_id ?? null
+        : normalizeNullableString(input.lmstudioModelId);
+    const nextCustomProviders = normalizeCustomProviders(
+      input.customProviders,
+      existing?.custom_providers,
+    );
+    const nextOpenAiApiKey =
+      normalizedOpenAiApiKey === undefined
+        ? existing?.openai_api_key ?? null
+        : normalizedOpenAiApiKey
+          ? encrypt(normalizedOpenAiApiKey)
+          : null;
 
-  const nextRow = {
-    user_id: userId,
-    model_id: nextModelId,
-    model_context_window: nextModelContextWindow,
-    openai_api_key: nextOpenAiApiKey,
-    lmstudio_base_url: nextLmStudioBaseUrl,
-    lmstudio_model_id: nextLmStudioModelId,
-    custom_providers: JSON.stringify(nextCustomProviders),
-  };
+    const nextRow = {
+      user_id: userId,
+      model_id: nextModelId,
+      model_context_window: nextModelContextWindow,
+      openai_api_key: nextOpenAiApiKey,
+      lmstudio_base_url: nextLmStudioBaseUrl,
+      lmstudio_model_id: nextLmStudioModelId,
+      custom_providers: JSON.stringify(nextCustomProviders),
+    };
 
-  await db
-    .insert(userSettings)
-    .values(nextRow)
-    .onConflictDoUpdate({
-      target: userSettings.user_id,
-      set: {
-        model_id: nextRow.model_id,
-        model_context_window: nextRow.model_context_window,
-        openai_api_key: nextRow.openai_api_key,
-        lmstudio_base_url: nextRow.lmstudio_base_url,
-        lmstudio_model_id: nextRow.lmstudio_model_id,
-        custom_providers: nextRow.custom_providers,
-      },
-    });
+    tx.insert(userSettings)
+      .values(nextRow)
+      .onConflictDoUpdate({
+        target: userSettings.user_id,
+        set: {
+          model_id: nextRow.model_id,
+          model_context_window: nextRow.model_context_window,
+          openai_api_key: nextRow.openai_api_key,
+          lmstudio_base_url: nextRow.lmstudio_base_url,
+          lmstudio_model_id: nextRow.lmstudio_model_id,
+          custom_providers: nextRow.custom_providers,
+        },
+      })
+      .run();
 
-  return {
-    userId,
-    modelId: nextModelId,
-    modelContextWindow: nextModelContextWindow,
-    hasOpenAIKey: Boolean(nextOpenAiApiKey),
-    lmstudioBaseUrl: nextLmStudioBaseUrl ?? null,
-    lmstudioModelId: nextLmStudioModelId,
-    customProviders: toPublicCustomProviders(nextCustomProviders),
-  };
+    return {
+      userId,
+      modelId: nextModelId,
+      modelContextWindow: nextModelContextWindow,
+      hasOpenAIKey: Boolean(nextOpenAiApiKey),
+      lmstudioBaseUrl: nextLmStudioBaseUrl ?? null,
+      lmstudioModelId: nextLmStudioModelId,
+      customProviders: toPublicCustomProviders(nextCustomProviders),
+    };
+  });
+}
+
+export async function updateModelContextWindow(
+  expected: UserSettings,
+  modelContextWindow: number | null,
+): Promise<PublicUserSettings> {
+  db.transaction((tx) => {
+    const current = tx
+      .select()
+      .from(userSettings)
+      .where(eq(userSettings.user_id, expected.user_id))
+      .get();
+    if (
+      current &&
+      current.model_id === expected.model_id &&
+      current.model_context_window === expected.model_context_window &&
+      current.openai_api_key === expected.openai_api_key &&
+      current.lmstudio_base_url === expected.lmstudio_base_url &&
+      current.lmstudio_model_id === expected.lmstudio_model_id &&
+      current.custom_providers === expected.custom_providers
+    ) {
+      tx.update(userSettings)
+        .set({ model_context_window: modelContextWindow })
+        .where(eq(userSettings.user_id, expected.user_id))
+        .run();
+    }
+  });
+  return getPublicUserSettings(expected.user_id);
 }
