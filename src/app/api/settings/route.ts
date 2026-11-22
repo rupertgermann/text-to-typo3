@@ -1,5 +1,6 @@
 import { type NextRequest } from "next/server";
-import { badRequest, withAuth } from "@/lib/api-route";
+import { apiError, badRequest, withAuth } from "@/lib/api-route";
+import { EncryptionKeyConfigurationError } from "@/lib/crypto";
 import {
   type CustomProviderInput,
   getPublicUserSettings,
@@ -132,6 +133,9 @@ export const PATCH = withAuth(async (request: NextRequest, auth) => {
   } catch (error) {
     if (error instanceof UserSettingsValidationError) {
       return badRequest(error.message);
+    }
+    if (error instanceof EncryptionKeyConfigurationError) {
+      return apiError("invalid_encryption_key", error.message, 500);
     }
 
     throw error;

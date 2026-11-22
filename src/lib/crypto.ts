@@ -4,10 +4,17 @@ const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH = 12;
 const TAG_LENGTH = 16;
 
+export class EncryptionKeyConfigurationError extends Error {
+  constructor() {
+    super("The server needs a 64-character hexadecimal ENCRYPTION_KEY. Check the server configuration and restart the app.");
+  }
+}
+
 function getKey(): Buffer {
   const hex = process.env.ENCRYPTION_KEY;
-  if (!hex || hex.length !== 64)
-    throw new Error("ENCRYPTION_KEY must be 64 hex chars (32 bytes)");
+  if (!hex || !/^[0-9a-f]{64}$/i.test(hex)) {
+    throw new EncryptionKeyConfigurationError();
+  }
   return Buffer.from(hex, "hex");
 }
 
