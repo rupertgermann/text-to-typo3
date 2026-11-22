@@ -204,15 +204,11 @@ export function SettingsModal({
                   label="Test MCP"
                   onClick={() => void form.testMcpConnection()}
                 />
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => {
-                    window.location.assign("/api/auth/logout");
-                  }}
-                >
-                  Logout
-                </Button>
+                <form action="/api/auth/logout">
+                  <Button type="submit" variant="outline">
+                    Logout
+                  </Button>
+                </form>
                 <ConnectionResult status={form.mcpConnection} />
               </div>
             </section>

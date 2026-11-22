@@ -139,7 +139,8 @@ export function useSettingsForm({
   open: boolean;
   onSaved: () => void;
 }) {
-  const [modelsLoading, setModelsLoading] = useState(false);
+  const [wasOpen, setWasOpen] = useState(open);
+  const [modelsLoading, setModelsLoading] = useState(open);
   const [saving, setSaving] = useState(false);
   const savePending = useRef(false);
   const catalogRequest = useRef<AbortController | null>(null);
@@ -177,25 +178,20 @@ export function useSettingsForm({
     revalidateOn: [SETTINGS_UPDATED_EVENT],
   });
 
-  useEffect(() => {
-    if (!settingsError) {
-      return;
-    }
-
-    setError(settingsError.message);
-  }, [settingsError]);
-
-  useEffect(() => {
-    if (!open) {
+  if (wasOpen !== open) {
+    setWasOpen(open);
+    if (open) {
+      setModelsLoading(true);
+      setError(null);
+      setCatalogState({ models: [], providerCatalogs: [] });
+    } else {
       setDraftInitialized(false);
       setOpenaiKey("");
       setCustomProviders([]);
-      return;
     }
-    if (draftInitialized || !settings) {
-      return;
-    }
+  }
 
+  if (open && !draftInitialized && settings) {
     setLmstudioBaseUrl(settings.lmstudioBaseUrl ?? "");
     setCustomProviders(
       settings.customProviders.map((provider) => ({
@@ -206,42 +202,37 @@ export function useSettingsForm({
     setSelectedModelId(settings.modelId ?? "");
     setSelectedLmStudioModelId(settings.lmstudioModelId ?? "");
     setDraftInitialized(true);
-  }, [draftInitialized, open, settings]);
+  }
 
-  const loadModels = useCallback(async (options?: { lmstudioBaseUrl?: string }) => {
+  const loadModels = useCallback((options?: { lmstudioBaseUrl?: string }) => {
     catalogRequest.current?.abort();
     const controller = new AbortController();
     catalogRequest.current = controller;
-    setModelsLoading(true);
-    setError(null);
-    setCatalogState({ models: [], providerCatalogs: [] });
 
-    try {
-      await readModelCatalogStream({
-        lmstudioBaseUrl: options?.lmstudioBaseUrl,
-        signal: controller.signal,
-        onProvider: (provider) => {
-          if (catalogRequest.current !== controller) return;
-          setCatalogState((current) => {
-            const nextProviders = applyProviderCatalog(
-              current.providerCatalogs,
-              provider,
-            );
-            return {
-              models: modelsFromProviders(nextProviders),
-              providerCatalogs: nextProviders,
-            };
-          });
-        },
-        onDone: (catalog) => {
-          if (catalogRequest.current !== controller) return;
-          setCatalogState({
-            models: catalog.models,
-            providerCatalogs: catalog.providers,
-          });
-        },
-      });
-    } catch (loadError) {
+    return readModelCatalogStream({
+      lmstudioBaseUrl: options?.lmstudioBaseUrl,
+      signal: controller.signal,
+      onProvider: (provider) => {
+        if (catalogRequest.current !== controller) return;
+        setCatalogState((current) => {
+          const nextProviders = applyProviderCatalog(
+            current.providerCatalogs,
+            provider,
+          );
+          return {
+            models: modelsFromProviders(nextProviders),
+            providerCatalogs: nextProviders,
+          };
+        });
+      },
+      onDone: (catalog) => {
+        if (catalogRequest.current !== controller) return;
+        setCatalogState({
+          models: catalog.models,
+          providerCatalogs: catalog.providers,
+        });
+      },
+    }).catch((loadError: unknown) => {
       if (catalogRequest.current !== controller) return;
       if (loadError instanceof Error && loadError.name === "AbortError") {
         return;
@@ -249,10 +240,9 @@ export function useSettingsForm({
       setError(
         loadError instanceof Error ? loadError.message : "Failed to fetch models",
       );
-    } finally {
+    }).finally(() => {
       if (catalogRequest.current === controller) setModelsLoading(false);
-    }
-
+    });
   }, []);
 
   useEffect(() => {
@@ -297,6 +287,9 @@ export function useSettingsForm({
   );
 
   async function refreshModels(nextLmStudioBaseUrl?: string) {
+    setModelsLoading(true);
+    setError(null);
+    setCatalogState({ models: [], providerCatalogs: [] });
     await loadModels({ lmstudioBaseUrl: nextLmStudioBaseUrl });
   }
 
@@ -495,7 +488,7 @@ export function useSettingsForm({
     customProviderConnections,
     customProviders,
     draftInitialized,
-    error,
+    error: error ?? settingsError?.message ?? null,
     handleSave,
     lmStudioModels,
     lmStudioProvider,
