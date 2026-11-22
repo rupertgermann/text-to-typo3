@@ -141,6 +141,19 @@ describe("settings route", () => {
     }
   });
 
+  it.each(["too-short", "z".repeat(64)])("explains encryption misconfiguration without partially saving settings", async (invalidKey) => {
+    vi.stubEnv("ENCRYPTION_KEY", invalidKey);
+    expect((await patch({ modelId: "gpt-6.1-terra" })).status).toBe(200);
+
+    const response = await patch({ modelId: "gpt-6.2-sol", openaiApiKey: "test-secret" });
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      error: { code: "invalid_encryption_key", message: expect.stringContaining("ENCRYPTION_KEY") },
+    });
+    expect(await (await GET()).json()).toMatchObject({ modelId: "gpt-6.1-terra", hasOpenAIKey: false });
+  });
+
   it("persists settings while keeping OpenAI keys encrypted and private", async () => {
     const patchResponse = await PATCH(
       new Request("http://localhost/api/settings", {
