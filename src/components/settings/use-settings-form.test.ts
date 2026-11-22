@@ -129,7 +129,7 @@ it("does not PATCH after the first settings GET fails", async () => {
 it("saves loaded settings, the selected model, and entered provider keys", async () => {
   draw(); request.resolve(Response.json(saved));
   let form = await settle();
-  form.setSelectedModelId("custom:provider:other");
+  form.selectModel({ id: "custom:provider:other", provider: "custom" });
   form.setOpenaiKey("new-openai-key");
   form.updateCustomProvider("provider", { apiKey: "new-provider-key" });
   form = draw();
@@ -143,6 +143,22 @@ it("saves loaded settings, the selected model, and entered provider keys", async
   });
   expect(onSaved).toHaveBeenCalledOnce();
 });
+it.each(["openai", "lmstudio"] as const)("saves an overlapping model ID for the chosen %s provider", async (provider) => {
+  const id = "gpt-6.2-sol";
+  draw();
+  request.resolve(Response.json({
+    ...saved, modelId: id, lmstudioModelId: provider === "openai" ? id : null,
+  }));
+  let form = await settle();
+  form.selectModel({ id, provider });
+  form = draw();
+  expect(form.isLmStudioSelected).toBe(provider === "lmstudio");
+  await form.handleSave();
+  expect(JSON.parse(String(patches()[0][1]?.body))).toMatchObject({
+    modelId: id, lmstudioModelId: provider === "lmstudio" ? id : null,
+  });
+});
+
 it("keeps the cached reopen draft through a delayed GET and initializes the next session", async () => {
   draw(); request.resolve(Response.json(saved)); await settle();
   opened = false; draw();
@@ -151,7 +167,7 @@ it("keeps the cached reopen draft through a delayed GET and initializes the next
   let form = draw();
   expect(form.lmstudioBaseUrl).toBe(saved.lmstudioBaseUrl);
   form.setLmstudioBaseUrl("http://edited.local/v1");
-  form.setSelectedModelId("custom:provider:edited");
+  form.selectModel({ id: "custom:provider:edited", provider: "custom" });
   form.setOpenaiKey("draft-openai-key");
   form.updateCustomProvider("provider", { apiKey: "draft-key" });
   form.addCustomProvider();

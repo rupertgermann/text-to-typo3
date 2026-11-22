@@ -102,7 +102,8 @@ export function resolveChatProvider({
         ? settings.lmstudioBaseUrl || undefined
         : undefined,
   });
-  const isChatCompletionsPath = useLmStudio || useCustomProvider;
+  const providerKind = useCustomProvider ? "custom" : useLmStudio ? "lmstudio" : "openai";
+  const isChatCompletionsPath = providerKind !== "openai";
   const model = isChatCompletionsPath
     ? provider.chat(modelId)
     : provider.responses(modelId);
@@ -110,15 +111,11 @@ export function resolveChatProvider({
   return {
     configuredModelId,
     contextWindow:
-      settings.modelContextWindow ?? getModelContextWindowHint(modelId),
+      settings.modelContextWindow ?? getModelContextWindowHint(modelId, providerKind),
     isChatCompletionsPath,
     model,
     modelId,
     provider,
-    providerKind: useCustomProvider
-      ? "custom"
-      : useLmStudio
-        ? "lmstudio"
-        : "openai",
+    providerKind,
   };
 }

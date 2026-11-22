@@ -102,10 +102,12 @@ function normalizeModelId(id: string): string {
   return id.trim();
 }
 
-export function getModelContextWindowHint(id: string): number | null {
+export function getModelContextWindowHint(id: string, provider: ModelProvider): number | null {
   const normalized = id.toLowerCase();
-  const knownWindow = getOpenAIModelContextWindowHint(normalized);
-  if (knownWindow !== null) return knownWindow;
+  if (provider === "openai") {
+    const knownWindow = getOpenAIModelContextWindowHint(normalized);
+    if (knownWindow !== null) return knownWindow;
+  }
 
   const hints: Array<[RegExp, number]> = [
     [/gpt-5/, 400000],
@@ -137,24 +139,16 @@ function buildDisplayName(id: string): string {
 
 export function getSelectedModelSummary({
   customProviders = [],
+  lmstudioBaseUrl,
   lmstudioModelId,
   modelId,
 }: {
   customProviders?: Pick<PublicCustomProvider, "displayName" | "id">[];
+  lmstudioBaseUrl?: string | null;
   lmstudioModelId?: string | null;
   modelId?: string | null;
 }): SelectedModelSummary {
   const id = normalizeModelId(modelId || DEFAULT_CHAT_MODEL_ID);
-  const openAIModel = KNOWN_OPENAI_MODELS.find((model) => model.id === id);
-
-  if (openAIModel) {
-    return {
-      id,
-      name: openAIModel.name,
-      providerName: "OpenAI",
-    };
-  }
-
   const customModelMatch = /^custom:([^:]+):(.+)$/.exec(id);
   if (customModelMatch) {
     const [, providerId, remoteModelId] = customModelMatch;
@@ -167,10 +161,15 @@ export function getSelectedModelSummary({
     };
   }
 
+  if (lmstudioBaseUrl && lmstudioModelId === id) {
+    return { id, name: buildDisplayName(id), providerName: "LM Studio" };
+  }
+
+  const openAIModel = KNOWN_OPENAI_MODELS.find((model) => model.id === id);
   return {
     id,
-    name: buildDisplayName(id),
-    providerName: lmstudioModelId === id ? "LM Studio" : null,
+    name: openAIModel?.name ?? buildDisplayName(id),
+    providerName: openAIModel ? "OpenAI" : null,
   };
 }
 
@@ -322,7 +321,7 @@ export async function fetchOpenAICompatibleModels(
         contextWindow:
           entry.context_length ??
           entry.max_context_length ??
-          getModelContextWindowHint(id),
+          getModelContextWindowHint(id, provider),
         baseUrl: normalizedBaseUrl,
       };
     })

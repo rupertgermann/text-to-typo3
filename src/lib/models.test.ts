@@ -40,12 +40,13 @@ describe("selected model summary", () => {
   it("labels selected LM Studio models from persisted settings", () => {
     expect(
       getSelectedModelSummary({
-        modelId: "local-content-model",
-        lmstudioModelId: "local-content-model",
+        modelId: "gpt-6.2-sol",
+        lmstudioBaseUrl: "http://localhost:1234/v1",
+        lmstudioModelId: "gpt-6.2-sol",
       }),
     ).toEqual({
-      id: "local-content-model",
-      name: "local content model",
+      id: "gpt-6.2-sol",
+      name: "gpt 6.2 sol",
       providerName: "LM Studio",
     });
   });
