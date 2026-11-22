@@ -65,6 +65,16 @@ describe("chat provider resolution", () => {
     expect(resolution.model).toBeTruthy();
   });
 
+  it("uses the OpenAI context limit only when an overlapping ID routes to OpenAI", () => {
+    const shared = settings({ modelId: "gpt-6.2-sol", lmstudioBaseUrl: "http://localhost:1234" });
+    const local = resolveChatProvider({ settings: { ...shared, lmstudioModelId: shared.modelId } });
+    const hosted = resolveChatProvider({ settings: shared, envOpenAiApiKey: "sk-test" });
+    expect(local.providerKind).toBe("lmstudio");
+    expect(local.contextWindow).toBeNull();
+    expect(hosted.providerKind).toBe("openai");
+    expect(hosted.contextWindow).toBe(1_050_000);
+  });
+
   it("rejects OpenAI selection without an API key", () => {
     vi.stubEnv("OPENAI_API_KEY", "");
 

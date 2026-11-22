@@ -293,6 +293,15 @@ export function useSettingsForm({
     await loadModels({ lmstudioBaseUrl: nextLmStudioBaseUrl });
   }
 
+  function selectModel({ id, provider }: Pick<AvailableModel, "id" | "provider">) {
+    setSelectedModelId(id);
+    if (provider === "lmstudio") {
+      setSelectedLmStudioModelId(id);
+    } else if (selectedLmStudioModelId === id) {
+      setSelectedLmStudioModelId("");
+    }
+  }
+
   async function handleSave() {
     if (!open || !draftInitialized || savePending.current) {
       return;
@@ -303,9 +312,6 @@ export function useSettingsForm({
     setError(null);
 
     try {
-      const selectedModel = catalogState.models.find(
-        (model) => model.id === selectedModelId,
-      );
       const response = await fetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -313,10 +319,7 @@ export function useSettingsForm({
           modelId: selectedModelId || null,
           openaiApiKey: openaiKey.trim() ? openaiKey : undefined,
           lmstudioBaseUrl: lmstudioBaseUrl.trim() || null,
-          lmstudioModelId:
-            selectedModel?.provider === "lmstudio"
-              ? selectedModel.id
-              : selectedLmStudioModelId || null,
+          lmstudioModelId: selectedLmStudioModelId || null,
           customProviders: customProviders
             .filter(
               (provider) =>
@@ -503,12 +506,13 @@ export function useSettingsForm({
     refreshModels,
     removeCustomProvider,
     saving,
-    selectedLmStudioModelId,
+    isLmStudioSelected: Boolean(
+      lmstudioBaseUrl.trim() && selectedModelId && selectedModelId === selectedLmStudioModelId,
+    ),
     selectedModelId,
+    selectModel,
     setLmstudioBaseUrl,
     setOpenaiKey,
-    setSelectedLmStudioModelId,
-    setSelectedModelId,
     settings,
     settingsLoading,
     testCustomProviderConnection,

@@ -79,17 +79,10 @@ export function SettingsModal({
               emptyMessage="No OpenAI models available yet."
               loadingMessage="OpenAI models loading."
               models={form.openAiModels}
-              selectedModelId={form.selectedModelId}
+              selectedModelId={form.isLmStudioSelected ? "" : form.selectedModelId}
               isLoading={form.modelsLoading}
               provider={form.openAiProvider}
-              onSelect={(nextModel) => {
-                form.setSelectedModelId(nextModel.id);
-                form.setSelectedLmStudioModelId(
-                  nextModel.provider === "lmstudio"
-                    ? nextModel.id
-                    : form.selectedLmStudioModelId,
-                );
-              }}
+              onSelect={form.selectModel}
             >
               <div className="space-y-2">
                 <label className="text-sm font-medium">OpenAI API Key</label>
@@ -119,9 +112,7 @@ export function SettingsModal({
               models={form.customModels}
               onAdd={form.addCustomProvider}
               onRemove={form.removeCustomProvider}
-              onSelectModel={(nextModel) => {
-                form.setSelectedModelId(nextModel.id);
-              }}
+              onSelectModel={form.selectModel}
               onTest={(provider) => void form.testCustomProviderConnection(provider)}
               onUpdate={form.updateCustomProvider}
               providers={form.customProviders}
@@ -135,17 +126,12 @@ export function SettingsModal({
               emptyMessage="No LM Studio models loaded."
               loadingMessage="LM Studio models loading."
               models={form.lmStudioModels}
-              selectedModelId={
-                form.selectedModelId || form.selectedLmStudioModelId
-              }
+              selectedModelId={form.isLmStudioSelected ? form.selectedModelId : ""}
               isLoading={
                 form.modelsLoading && Boolean(form.lmstudioBaseUrl.trim())
               }
               provider={form.lmStudioProvider}
-              onSelect={(nextModel) => {
-                form.setSelectedModelId(nextModel.id);
-                form.setSelectedLmStudioModelId(nextModel.id);
-              }}
+              onSelect={form.selectModel}
             >
               <div className="flex gap-2">
                 <Input
