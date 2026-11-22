@@ -23,6 +23,7 @@ describe("model context window labels", () => {
     expect(getModelContextWindowShortLabel(null)).toBe("Context unknown");
     expect(getModelContextWindowShortLabel(32000)).toBe("32k ctx");
     expect(getModelContextWindowShortLabel(1000000)).toBe("1M ctx");
+    expect(getModelContextWindowShortLabel(1_050_000)).toBe("1.05M ctx");
     expect(getModelContextWindowShortLabel(512)).toBe("512 ctx");
   });
 });
@@ -77,6 +78,10 @@ describe("OpenAI model catalog filtering", () => {
         seenSignals.push(init?.signal);
         return Response.json({
           data: [
+            { id: "gpt-6-luna" },
+            { id: "gpt-6.2-sol" },
+            { id: "gpt-6.2-astra" },
+            { id: "gpt-6.1-terra" },
             { id: "gpt-5.5" },
             { id: "gpt-5.4" },
             { id: "text-embedding-3-large" },
@@ -98,16 +103,14 @@ describe("OpenAI model catalog filtering", () => {
 
     expect(seenSignals).toEqual([expect.any(AbortSignal)]);
     expect(models.map((model) => model.id)).toEqual([
-      "gpt-5.5",
-      "gpt-5.4",
-      "gpt-5.4-mini",
+      "gpt-6.2-astra",
+      "gpt-6.2-sol",
+      "gpt-6.1-terra",
+      "gpt-6-luna",
     ]);
-    expect(models[0]).toMatchObject({
-      name: "GPT-5.5",
-      provider: "openai",
-      contextWindow: 400000,
-      description: "A new class of intelligence for coding and professional work.",
-    });
+    for (const model of models) {
+      expect(model).toMatchObject({ provider: "openai", contextWindow: 1_050_000 });
+    }
   });
 
   it("passes an AbortSignal to OpenAI-compatible model fetches", async () => {

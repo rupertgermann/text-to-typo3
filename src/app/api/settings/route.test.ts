@@ -82,7 +82,7 @@ describe("settings route", () => {
   });
 
   it.each([
-    { change: "model", modelId: "gpt-5.4-mini", modelContextWindow: 400000 },
+    { change: "model", modelId: "gpt-6.2-sol", modelContextWindow: 1_050_000 },
     { change: "provider URL", modelId: "local-chat", modelContextWindow: 65536 },
     { change: "cleared model", modelId: null, modelContextWindow: null },
   ])("discards delayed catalog metadata after $change changes", async ({ change, modelId, modelContextWindow }) => {

@@ -62,26 +62,40 @@ export interface SelectedModelSummary {
   providerName: string | null;
 }
 
-const LATEST_OPENAI_MODELS: Array<{
-  id: string;
-  name: string;
-  description: string;
-}> = [
+// Stable chat model IDs from https://developers.openai.com/api/docs/models
+const LATEST_OPENAI_MODELS = [
   {
-    id: "gpt-5.5",
-    name: "GPT-5.5",
-    description: "A new class of intelligence for coding and professional work.",
+    id: "gpt-6.2-astra",
+    name: "GPT-6.2 Astra",
+    description: "For complex reasoning, coding, and multi-step projects.",
+    contextWindow: 1_050_000,
   },
   {
-    id: "gpt-5.4",
-    name: "GPT-5.4",
-    description: "A more affordable model for coding and professional work.",
+    id: "gpt-6.2-sol",
+    name: "GPT-6.2 Sol",
+    description: "For everyday coding and workflows that use tools.",
+    contextWindow: 1_050_000,
   },
   {
-    id: "gpt-5.4-mini",
-    name: "GPT-5.4 mini",
-    description: "Our strongest mini model yet for coding, computer use, and subagents",
+    id: "gpt-6.1-terra",
+    name: "GPT-6.1 Terra",
+    description: "For interpreting images and drafting or revising text.",
+    contextWindow: 1_050_000,
   },
+  {
+    id: "gpt-6-luna",
+    name: "GPT-6 Luna",
+    description: "For focused tasks where cost and throughput matter.",
+    contextWindow: 1_050_000,
+  },
+];
+
+// Keep names and context limits for existing saved selections.
+const KNOWN_OPENAI_MODELS = [
+  ...LATEST_OPENAI_MODELS,
+  { id: "gpt-5.5", name: "GPT-5.5", contextWindow: 1_050_000 },
+  { id: "gpt-5.4", name: "GPT-5.4", contextWindow: 1_050_000 },
+  { id: "gpt-5.4-mini", name: "GPT-5.4 mini", contextWindow: 400_000 },
 ];
 
 function normalizeModelId(id: string): string {
@@ -90,6 +104,8 @@ function normalizeModelId(id: string): string {
 
 export function getModelContextWindowHint(id: string): number | null {
   const normalized = id.toLowerCase();
+  const knownWindow = getOpenAIModelContextWindowHint(normalized);
+  if (knownWindow !== null) return knownWindow;
 
   const hints: Array<[RegExp, number]> = [
     [/gpt-5/, 400000],
@@ -112,9 +128,7 @@ export function getModelContextWindowHint(id: string): number | null {
 
 export function getOpenAIModelContextWindowHint(id: string): number | null {
   const normalized = normalizeModelId(id);
-  return LATEST_OPENAI_MODELS.some((model) => model.id === normalized)
-    ? getModelContextWindowHint(normalized)
-    : null;
+  return KNOWN_OPENAI_MODELS.find((model) => model.id === normalized)?.contextWindow ?? null;
 }
 
 function buildDisplayName(id: string): string {
@@ -131,7 +145,7 @@ export function getSelectedModelSummary({
   modelId?: string | null;
 }): SelectedModelSummary {
   const id = normalizeModelId(modelId || DEFAULT_CHAT_MODEL_ID);
-  const openAIModel = LATEST_OPENAI_MODELS.find((model) => model.id === id);
+  const openAIModel = KNOWN_OPENAI_MODELS.find((model) => model.id === id);
 
   if (openAIModel) {
     return {
@@ -219,7 +233,7 @@ export async function fetchOpenAIModels(
       providerId: "openai",
       providerName: "OpenAI",
       remoteModelId: model.id,
-      contextWindow: getModelContextWindowHint(model.id),
+      contextWindow: model.contextWindow,
       description: model.description,
     }));
 }
@@ -344,7 +358,7 @@ export function getModelContextWindowShortLabel(
   }
 
   if (contextWindow >= 1_000_000) {
-    return `${Math.round(contextWindow / 1_000_000)}M ctx`;
+    return `${Number((contextWindow / 1_000_000).toFixed(2))}M ctx`;
   }
 
   if (contextWindow >= 1_000) {
