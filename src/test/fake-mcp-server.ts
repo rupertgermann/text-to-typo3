@@ -11,6 +11,7 @@ type JsonRpcRequest = {
 
 type FakeMcpRequest = JsonRpcRequest & {
   headers: http.IncomingHttpHeaders;
+  url: string | undefined;
 };
 
 export type FakeMcpToolCall = {
@@ -346,6 +347,7 @@ export async function startFakeMcpServer(options?: {
   sessionIds?: string[];
   statusByMethod?: Record<string, number>;
   tools?: FakeMcpToolDefinition[];
+  toolResults?: Record<string, Record<string, unknown>>;
 }): Promise<FakeMcpServer> {
   const requests: FakeMcpRequest[] = [];
   const sockets = new Set<net.Socket>();
@@ -359,7 +361,7 @@ export async function startFakeMcpServer(options?: {
     }
 
     const payload = JSON.parse(await readRequestBody(request)) as JsonRpcRequest;
-    requests.push({ ...payload, headers: request.headers });
+    requests.push({ ...payload, headers: request.headers, url: request.url });
     const status = payload.method
       ? options?.statusByMethod?.[payload.method]
       : undefined;
@@ -436,7 +438,7 @@ export async function startFakeMcpServer(options?: {
         JSON.stringify({
           jsonrpc: "2.0",
           id: payload.id ?? null,
-          result: toolResult(name, toolArguments),
+          result: options?.toolResults?.[name] ?? toolResult(name, toolArguments),
         }),
       );
       return;

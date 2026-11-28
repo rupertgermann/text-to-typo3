@@ -8,6 +8,7 @@ import remarkGfm from "remark-gfm";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ToolCallCard, type GenericToolPart } from "./ToolCallCard";
+import type { Typo3UploadControls } from "./typo3-file-upload";
 import { extractMessageText } from "@/lib/chat-message-parts";
 import { formatTokenUsage } from "@/lib/token-usage";
 
@@ -17,6 +18,7 @@ interface MessageBubbleProps {
   allowRegenerate?: boolean;
   pendingApprovalToolCallIds?: ReadonlySet<string>;
   typo3BaseUrl: string;
+  uploadControls?: Typo3UploadControls;
   onEdit?: () => void;
   onRegenerate?: () => void;
   onToolApprovalResponse?: (response: {
@@ -79,6 +81,7 @@ function MessageBubbleComponent({
   allowRegenerate = false,
   pendingApprovalToolCallIds,
   typo3BaseUrl,
+  uploadControls,
   onEdit,
   onRegenerate,
   onToolApprovalResponse,
@@ -238,6 +241,7 @@ function MessageBubbleComponent({
                 part={part as GenericToolPart}
                 isPendingApproval={pendingApprovalToolCallIds?.has(part.toolCallId)}
                 typo3BaseUrl={typo3BaseUrl}
+                uploadControls={uploadControls}
                 onApprovalResponse={onToolApprovalResponse}
               />
             );

@@ -41,8 +41,10 @@ import {
   createMcpExecution,
   listMcpToolNamesByOperation,
   getTypo3McpUrl,
+  getMcpAuthorization,
+  normalizeNativeMcpOutput,
 } from "@/lib/mcp";
-import { hasUnknownWriteOutcome, normalizeNativeMcpOutput, unknownWriteResult } from "@/lib/mcp-outcome";
+import { getChangeTarget, hasUnknownWriteOutcome, unknownWriteResult } from "@/lib/mcp-outcome";
 import { getResolvedUserSettings } from "@/lib/user-settings";
 import { normalizeLanguageModelUsage } from "@/lib/token-usage";
 
@@ -51,10 +53,12 @@ const SYSTEM_PROMPT = `TYPO3 MCP operating policy:
 - Before writing, read the relevant current page, record, table, or configuration context unless the user has already provided enough current data in this turn.
 - Keep MCP context small: when a read, list, or search tool supports fields, limit, filters, or pagination, request only the fields and records needed for the next decision. Increase scope incrementally when the task requires it.
 - If table fields, required values, relation fields, FlexForm paths, or allowed values are unclear, inspect the relevant table or FlexForm schema before writing.
-- Write operations are queued as TYPO3 workspace changes. They are not live until an editor publishes them in the TYPO3 backend. Describe successful writes as queued workspace changes, not published or live changes.
+- WriteTable queues TYPO3 workspace changes. These changes become live when an editor publishes them in the TYPO3 backend. Report successful record writes as queued workspace changes.
+- UploadFile can add a public URL, supported online media, or raw text content to TYPO3 file storage immediately. A local file request uses UploadFile without url or content. When a file chooser is waiting, direct the user to it and wait for the upload receipt. Only use a file UID from an actual upload receipt to reference the file in a record.
+- Workspace preview links are available in the relevant tool details. When the user asks how to see unpublished changes, direct them to the preview link there.
 - Do not ask for extra confirmation for narrow, reversible edits the user clearly requested; rely on the app's write approval gate when present. Ask for confirmation before broad, risky, destructive, or many-record changes. If a write approval is pending, wait for the user's approve or deny response.
 - When a write returns validation, missing-input, or rejected-field feedback, treat the tool output as retry guidance. Adjust from the error and available schema or context, then retry unless the output proves a real blocker.
-- If a write outcome is unknown, stop. Do not retry it or assume it failed. Tell the user to check the TYPO3 workspace and reconcile the result in a new message.
+- If a write outcome is unknown, stop. Do not retry it or assume it failed. Ask the user to check the affected TYPO3 workspace or file storage and reconcile the result in a new message.
 - Do not restate or depend on WriteTable parameter mechanics beyond what the active tool description and schema provide.
 - Translation workflows are experimental. Only translate, localize, or update translated TYPO3 records when the user explicitly asks for translation work, and state any uncertainty before writing.
 
@@ -111,6 +115,37 @@ export async function streamChatExchange({
       throw error;
     }
 
+    const nativeApprovalNames = turn.nativeApprovalNames;
+    const nativeContinuation = nativeApprovalNames.length > 0;
+    let nativeReadToolNames: string[] = [];
+    if (nativeContinuation) {
+      try {
+        const catalog = nativeApprovalNames.includes("UploadFile")
+          ? null
+          : await listMcpToolNamesByOperation({ accessToken: auth.accessToken });
+        if (!catalog || catalog.write.includes("UploadFile")) {
+          const reason = "Send the TYPO3 request again in a new message to create a fresh approval.";
+          const deniedIds = turn.claimApproval?.(reason) ?? [];
+          return createUIMessageStreamResponse({
+            stream: createUIMessageStream({
+              originalMessages: uiMessages,
+              execute: ({ writer }) => {
+                for (const toolCallId of deniedIds) writer.write({ type: "tool-output-denied", toolCallId });
+                const id = crypto.randomUUID();
+                writer.write({ type: "text-start", id });
+                writer.write({ type: "text-delta", id, delta: reason });
+                writer.write({ type: "text-end", id });
+              },
+            }),
+          });
+        }
+        nativeReadToolNames = catalog.read;
+      } catch (error) {
+        if (error instanceof ChatTurnResolutionError) return badRequest(error.message);
+        return upstreamError(getChatErrorMessage(error, "mcp"));
+      }
+    }
+
     const userSettings = await getResolvedUserSettings(userId);
     let providerResolution;
     try {
@@ -129,17 +164,12 @@ export async function streamChatExchange({
     const maxSteps = getAgentLoopMaxSteps();
     const requireWriteApproval = !Boolean(turn.conversation.auto_approve_writes);
 
-    const execution = createMcpExecution(signal);
-    const nativeApprovalNames = turn.nativeApprovalNames;
-    const nativeContinuation = nativeApprovalNames.length > 0;
-    let nativeReadToolNames: string[] = [];
+    const uploadScope = { userId, conversationId };
+    const execution = createMcpExecution(signal, uploadScope);
     let tools;
     try {
-      if (nativeContinuation) {
-        if (providerResolution.providerKind !== "openai") {
-          return badRequest("Continue the saved approval with an OpenAI model.");
-        }
-        nativeReadToolNames = (await listMcpToolNamesByOperation({ accessToken: auth.accessToken })).read;
+      if (nativeContinuation && providerResolution.providerKind !== "openai") {
+        return badRequest("Continue the saved approval with an OpenAI model.");
       }
       tools = nativeContinuation
         ? {
@@ -148,9 +178,7 @@ export async function streamChatExchange({
               serverUrl: getTypo3McpUrl(),
               requireApproval: "always",
               allowedTools: nativeApprovalNames,
-              headers: auth.accessToken
-                ? { Authorization: `Bearer ${auth.accessToken}` }
-                : undefined,
+              headers: getMcpAuthorization(auth.accessToken),
             }),
           }
         : await getMcpTools({
@@ -160,6 +188,7 @@ export async function streamChatExchange({
             execution,
           });
     } catch (error) {
+      if (error instanceof ChatTurnResolutionError) return badRequest(error.message);
       return upstreamError(getChatErrorMessage(error, "mcp"));
     }
 
@@ -225,9 +254,10 @@ export async function streamChatExchange({
       experimental_transform: () => new TransformStream({
         transform(chunk, controller) {
           if (nativeContinuation && chunk.type === "tool-result" && chunk.toolName.startsWith("mcp.")) {
+            const name = chunk.toolName.slice(4);
             controller.enqueue({
               ...chunk,
-              output: normalizeNativeMcpOutput(chunk.output, nativeReadToolNames.includes(chunk.toolName.slice(4)) ? "read" : "write"),
+              output: normalizeNativeMcpOutput(chunk.output, name, nativeReadToolNames.includes(name) ? "read" : "write"),
             });
           } else {
             controller.enqueue(chunk);
@@ -242,6 +272,7 @@ export async function streamChatExchange({
           stepNumber,
           maxSteps,
           steps,
+          pendingUpload: execution.hasPendingUpload(),
         });
       },
     });
@@ -266,7 +297,7 @@ export async function streamChatExchange({
             writer.write({
               type: "tool-output-available",
               toolCallId: part.toolCallId,
-              output: unknownWriteResult(),
+              output: unknownWriteResult(getChangeTarget(part.toolName)),
               dynamic: true,
               providerExecuted: true,
             });

@@ -80,6 +80,31 @@ describe("chat message part serialization", () => {
     ]);
   });
 
+  it("redacts legacy preview URLs and app-only links before replaying history", () => {
+    const live = "https://www.example.test/news";
+    const preview = `${live}?ADMCMD_prev=legacy-secret`;
+    const messages = [{
+      id: "preview-message",
+      role: "assistant",
+      parts: [{
+        type: "tool-ReadTable",
+        toolCallId: "legacy-record",
+        state: "output-available",
+        input: { table: "pages" },
+        output: {
+          content: [{ type: "text", text: JSON.stringify({ frontend_url: live, preview_url: preview }) }],
+          _meta: { recordLinks: [{ kind: "preview", url: preview }] },
+        },
+      }, { type: "text", text: `See [draft](${preview}).` }],
+    }] satisfies UIMessage[];
+
+    const history = JSON.stringify(prepareMessagesForModelInput(messages));
+    expect(history).toContain(live);
+    expect(history).not.toContain("legacy-secret");
+    expect(history).not.toContain("recordLinks");
+    expect(history).not.toContain("preview_url");
+  });
+
   it("removes stale duplicate tool calls before model conversion", () => {
     const messages = [
       {

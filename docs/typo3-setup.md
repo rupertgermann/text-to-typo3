@@ -1,8 +1,8 @@
-# TYPO3 Setup
+# TYPO3 setup
 
-This guide covers the TYPO3-side requirements for `text-to-typo3`, including the exact Composer packages to install, how each TYPO3 value maps into `.env.local`, when to use OAuth mode versus token-based MCP mode, and what TYPO3 MCP capabilities the chat app expects.
+Connect Text to TYPO3 to a TYPO3 instance with the MCP server extension.
 
-## Required TYPO3 Packages
+## Required TYPO3 packages
 
 Install the TYPO3 MCP server extension in the TYPO3 instance:
 
@@ -10,9 +10,9 @@ Install the TYPO3 MCP server extension in the TYPO3 instance:
 composer require hn/typo3-mcp-server
 ```
 
-The package metadata for `hn/typo3-mcp-server` requires TYPO3 13.4+ and also requires `typo3/cms-workspaces`, so Workspaces is part of the supported setup already.
+The extension supports TYPO3 13.4 and 14.3 and installs Workspaces as a dependency.
 
-## Optional TYPO3 Packages
+## Optional TYPO3 packages
 
 Install `EXT:news` only if the TYPO3 instance should expose news records to MCP tools or if the scaffold workflow should seed a demo news article:
 
@@ -20,20 +20,59 @@ Install `EXT:news` only if the TYPO3 instance should expose news records to MCP 
 composer require georgringer/news
 ```
 
-## Enable And Verify TYPO3
+## Enable and verify TYPO3
 
-After installing the Composer package:
+After installing the Composer package, set up the extension and check its MCP endpoint.
 
-1. Run the normal TYPO3 extension setup flow for the instance.
-2. Log into the TYPO3 backend with a backend user that has access to the MCP server.
-3. Open `[Username] -> MCP Server` in the TYPO3 backend.
-4. Confirm that TYPO3 shows the MCP Server screen and a server URL.
+1. Run `vendor/bin/typo3 extension:setup --extension=mcp_server`.
+2. Sign in to the TYPO3 backend with a user who has access to the MCP server.
+3. Open **MCP Server** from the username menu and copy the server URL.
 
-The public package documentation for `hn/typo3-mcp-server` describes this backend flow and says the MCP Server screen is available under `[Username] -> MCP Server`.
+## Local TYPO3 v14 demo
 
-## TYPO3 MCP Capabilities Used By The App
+Run these commands from the local DDEV TYPO3 project to install the exact revision used by the demo.
 
-The chat interface is designed around the TYPO3 MCP server v0.4.4 toolset:
+```bash
+ddev composer require 'hn/typo3-mcp-server:dev-main#2f1eac930f67f5d99830718f154086812747bb95'
+ddev exec vendor/bin/typo3 extension:setup --extension=mcp_server
+```
+
+This upstream revision includes fixes for page mount checks and blocks record writes without an active workspace. The setup command installs the MCP extension's OAuth refresh-token schema.
+
+Use a dedicated non-admin backend user with one page mount and a writable workspace. Give the user read and edit access to the target page and content types. For file workflows, give the user a dedicated writable file mount and the permissions listed below. Keep workspace publishing with its owner.
+
+Create a manual bearer token in **MCP Server**, or run the command below with the dedicated backend username. Store the token in the app's local environment file.
+
+```bash
+ddev exec vendor/bin/typo3 mcp:oauth create text-to-typo3-demo --client-name='Text to TYPO3 local v14 demo'
+```
+
+In a separate app checkout, copy `.env.example` to `.env.local` and set its permissions with `chmod 600 .env.local`. Keep the existing v13 checkout and its environment file available for v13 work. Fill in the required app secrets from the example and set the demo values below.
+
+```dotenv
+TYPO3_BASE_URL=https://typo3-v14.ddev.site
+TYPO3_MCP_URL=https://typo3-v14.ddev.site/mcp
+TYPO3_MCP_ACCESS_TOKEN=replace-with-manual-demo-token
+TYPO3_LOCAL_USER_NAME=Text to TYPO3 demo
+TYPO3_OAUTH_MODE=
+TYPO3_OAUTH_CLIENT_ID=
+TYPO3_OAUTH_CLIENT_SECRET=
+NEXT_PUBLIC_APP_URL=http://127.0.0.1:3014
+DATABASE_PATH=data/typo3-v14-demo.db
+```
+
+From the app checkout, install dependencies and start the demo on loopback.
+
+```bash
+pnpm install
+pnpm dev --hostname 127.0.0.1 --port 3014
+```
+
+If Node does not trust the DDEV certificate on macOS, use `NODE_OPTIONS=--use-system-ca` with a Node version that supports it, or set `NODE_EXTRA_CA_CERTS` to the local DDEV CA certificate. Open [the local app](http://127.0.0.1:3014) and use the MCP connection test in Settings.
+
+The Camino fixture is page `142` at `/camino/text-to-typo3-demo`. Use `1:/text-to-typo3-demo/` as the upload target. Sign in with a workspace owner in the TYPO3 backend to review the staged edits. [Pinned MCP server revision](https://github.com/hauptsacheNet/typo3-mcp-server/tree/2f1eac930f67f5d99830718f154086812747bb95)
+
+## TYPO3 MCP tools
 
 - `GetPageTree`
 - `GetPage`
@@ -43,14 +82,17 @@ The chat interface is designed around the TYPO3 MCP server v0.4.4 toolset:
 - `GetTableSchema`
 - `GetFlexFormSchema`
 - `WriteTable`
+- `UploadFile`
 
-The v0.4.4 server publishes rich tool descriptions and MCP tool annotations with `tools/list`. The app treats `annotations.readOnlyHint === true` as read-only and treats `readOnlyHint === false` or missing annotations as write-capable, so unannotated tools require write approval by default.
+The server advertises its tools, input schemas, and annotations through `tools/list`. The app treats tools marked `readOnlyHint: true` as reads. For tools marked as write-capable or without an annotation, the app applies the conversation's write approval setting.
 
-The server descriptions are the source of truth for tool parameter mechanics, including search-and-replace edits, moving records through `pid`/position values, relation and file-reference handling, `fields` filtering, and translation actions. The app prompt only adds operating policy around approvals, context economy, workspace publishing, and retry behavior.
+Use the advertised schema for search-and-replace edits, record moves, file references, field filters, and translation. The available tables and fields depend on the backend user's permissions and the target page.
 
-`ReadTable` can expose file records such as `sys_file` with `public_url` values. The app renders those URLs as links and shows inline thumbnails for image files on the configured TYPO3 host.
+`ReadTable` can return `sys_file` records with `public_url` values. The app shows links to available files and inline thumbnails for images on the configured TYPO3 host.
 
-`WriteTable` queues changes in a TYPO3 workspace. Those changes are not live until an editor publishes the workspace in the TYPO3 backend. The app shows per-write workspace notes and a conversation-level pending-change count, but in-app publishing is not supported because the MCP server exposes no publish tool.
+`WriteTable` stages changes in a TYPO3 workspace. Review and publish them in the TYPO3 backend. The app shows the write result and counts pending record changes. When TYPO3 returns both page URLs, the app labels the live page and the workspace preview separately.
+
+Treat a workspace preview URL as a credential. Anyone with the link can see unpublished changes in the workspace until it expires. The app shows the link in tool details and removes it from model input and Markdown exports. The lifetime comes from the workspace settings. The local demo uses one hour. Turn off `workspacePreviewLinks` in the MCP extension settings if your workspace requires backend-only previews.
 
 Translation support is available through `WriteTable` but is experimental upstream. The assistant should only use translation workflows when the editor explicitly asks for translation work.
 
@@ -58,7 +100,7 @@ The app supports multi-step MCP runs, so a single user request can read page con
 
 OpenAI, LM Studio, and custom OpenAI-compatible models all use this toolset. The app routes provider requests differently where needed, but TYPO3-side MCP capabilities stay the same.
 
-Every MCP request uses a request-level timeout. Hung TYPO3 MCP endpoints return categorized API errors instead of leaving a chat request open indefinitely. MCP session IDs are cached with a 25-minute safety window for the server's 30-minute session timeout and refreshed transparently when the TYPO3 server rotates or expires a session. The client sends the newest supported initialize protocol version and uses the protocol version returned by the server on later MCP requests.
+Most MCP requests time out after 5 seconds. An `UploadFile` call with a URL has 305 seconds to allow TYPO3 to download the file. The client caches MCP sessions for up to 25 minutes and reinitializes expired sessions using the server's negotiated protocol version.
 
 For content creation and updates, TYPO3 users should have:
 
@@ -70,7 +112,26 @@ When TYPO3 returns validation feedback, the assistant can inspect schema details
 
 For LM Studio mutation requests, the tool loop is kept in tool-calling mode until a write succeeds or the request reaches the configured step limit, which helps local models avoid stopping after the first read tool call.
 
-## `.env.local` Values And Where They Come From
+## Upload files to TYPO3
+
+`UploadFile` supports four workflows.
+
+| Workflow | Input |
+| --- | --- |
+| Import a public file URL | Give chat a public HTTP or HTTPS URL. TYPO3 downloads the file into the target folder. |
+| Add online media | Give chat a supported YouTube or Vimeo URL. TYPO3 stores a media reference to the video. |
+| Save text as a file | Ask chat to save text in a supported format, such as CSV or WebVTT. Supply a filename with the extension. |
+| Upload a local file | Ask chat for an upload, select the file in the chat or Activity panel, then submit it. The app sends the bytes without including them in model context. |
+
+Set `targetFolder` to a writable FAL folder within the backend user's file mount. Use TYPO3's combined identifier, such as `1:/text-to-typo3-demo/`, when the user's default storage folder is outside the mount.
+
+The extension adds files to storage immediately. A record that references an uploaded file still requires a separate `WriteTable` action in the workspace. File uploads do not increase the pending record-change count. TYPO3 renames files on filename conflicts and can reuse an identical file already in storage.
+
+Local upload grants belong to the current app process and are single-use. They expire at the earlier of TYPO3's expiration time or 15 minutes. Use one app process for local uploads. Request a new upload if the app process restarts, the grant expires, or an upload attempt fails. The app accepts up to 500 MiB per local file with a 60-second upload deadline. TYPO3 and any proxy can enforce lower limits. [Upstream file handling](https://github.com/hauptsacheNet/typo3-mcp-server/blob/2f1eac930f67f5d99830718f154086812747bb95/TECHNICAL_OVERVIEW.md#imagefile-handling)
+
+The completed upload receipt stays in the current browser tab and survives a reload. To find the UID later or from another tab or device, refer to a sent message that includes the UID or look up the file in TYPO3 storage.
+
+## Environment values
 
 This project expects the following TYPO3-related values in `.env.local`:
 
@@ -79,17 +140,18 @@ TYPO3_BASE_URL=
 TYPO3_MCP_URL=
 TYPO3_MCP_ACCESS_TOKEN=
 TYPO3_LOCAL_USER_NAME=
+TYPO3_OAUTH_MODE=
 TYPO3_OAUTH_CLIENT_ID=
 TYPO3_OAUTH_CLIENT_SECRET=
 TYPO3_AGENT_MAX_STEPS=
 NEXT_PUBLIC_APP_URL=
 ```
 
-## Supported Auth Modes
+## Supported authentication modes
 
-### OAuth mode
+### Existing TYPO3 OAuth integration
 
-Use OAuth mode when the TYPO3 instance exposes:
+Use this mode for TYPO3 instances that expose the OAuth endpoints the app uses for sign-in and user identity.
 
 - `/oauth/authorize`
 - `/oauth/token`
@@ -105,9 +167,40 @@ In this mode, the required values are:
 
 In OAuth mode, visiting the app without an active session starts the TYPO3 browser login flow automatically.
 
+### Native MCP OAuth
+
+Use this mode to sign in through the MCP extension's OAuth endpoints. Register a public client once with the exact app callback URL. The example below uses a separate local app on port `3015`.
+
+```bash
+curl -fsS https://typo3-v14.ddev.site/mcp_oauth/register \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "client_name": "Text to TYPO3",
+    "redirect_uris": ["http://127.0.0.1:3015/api/auth/callback"],
+    "token_endpoint_auth_method": "none",
+    "grant_types": ["authorization_code", "refresh_token"],
+    "response_types": ["code"],
+    "scope": "mcp_access"
+  }' | jq -r .client_id
+```
+
+Set the app's environment values for native MCP OAuth.
+
+```dotenv
+TYPO3_BASE_URL=https://typo3-v14.ddev.site
+TYPO3_OAUTH_MODE=mcp
+TYPO3_OAUTH_CLIENT_ID=replace-with-registered-client-id
+TYPO3_OAUTH_CLIENT_SECRET=
+TYPO3_MCP_URL=
+TYPO3_MCP_ACCESS_TOKEN=
+NEXT_PUBLIC_APP_URL=http://127.0.0.1:3015
+```
+
+The app uses authorization code with PKCE. It refreshes the access token when needed during the session. Upstream supplies opaque tokens without a stable user identity, so each authorization creates a separate local profile and conversation history. Signing out ends the local app session. Use **MCP Server** in the TYPO3 backend to revoke the upstream grant. Use manual bearer-token mode for a local demo that should retain one profile across sessions. [Upstream OAuth endpoints](https://github.com/hauptsacheNet/typo3-mcp-server/blob/2f1eac930f67f5d99830718f154086812747bb95/Classes/Middleware/McpServerMiddleware.php)
+
 ### Token-based MCP mode
 
-Use token-based MCP mode when the TYPO3 backend MCP Server screen shows a tokenized URL like:
+Use token-based MCP mode for a dedicated local account. The backend user's TYPO3 permissions apply to each request. The MCP server can provide a manual bearer token or a URL that includes the token.
 
 ```text
 https://your-typo3.example/mcp?token=...
@@ -177,6 +270,10 @@ If TYPO3 only provides the full tokenized MCP URL, `TYPO3_MCP_URL` is the better
 
 `TYPO3_LOCAL_USER_NAME` is the local display name used by the app in token-based mode. It does not have to match a TYPO3 backend username.
 
+### `TYPO3_OAUTH_MODE`
+
+Set `TYPO3_OAUTH_MODE=mcp` for native MCP OAuth. Leave it empty for an existing TYPO3 OAuth integration.
+
 ### `TYPO3_OAUTH_CLIENT_ID`
 
 `TYPO3_OAUTH_CLIENT_ID` is the OAuth client ID for this Next.js app inside TYPO3.
@@ -200,7 +297,7 @@ TYPO3_OAUTH_CLIENT_ID=text-to-typo3-web
 
 ### `TYPO3_OAUTH_CLIENT_SECRET`
 
-`TYPO3_OAUTH_CLIENT_SECRET` is the OAuth client secret that belongs to the same TYPO3 OAuth client as the client ID.
+`TYPO3_OAUTH_CLIENT_SECRET` is the client secret for the existing TYPO3 OAuth integration. Leave it empty for the public client used by native MCP OAuth.
 
 How to get it:
 
@@ -256,10 +353,9 @@ composer require hn/typo3-mcp-server
 4. Copy the MCP server URL and derive `TYPO3_BASE_URL` from it.
 5. Choose one connection mode:
 
-- OAuth mode:
-  Register an OAuth client in TYPO3 for this app with redirect URI `${NEXT_PUBLIC_APP_URL}/api/auth/callback`, then copy the client ID and client secret into `.env.local`.
-- token-based MCP mode:
-  Copy the tokenized MCP URL from the TYPO3 MCP Server screen into `TYPO3_MCP_URL`.
+- For an existing TYPO3 OAuth integration, register the app callback and copy the client ID and secret into `.env.local`.
+- For native MCP OAuth, register a public client and set `TYPO3_OAUTH_MODE=mcp`.
+- For token-based MCP mode, copy a manual bearer token into `TYPO3_MCP_ACCESS_TOKEN` or set `TYPO3_MCP_URL` to the tokenized URL.
 
 ### Scaffolded TYPO3 Instance
 
@@ -292,18 +388,16 @@ This app expects TYPO3 to answer at:
 
 - `${TYPO3_MCP_URL}` or `${TYPO3_BASE_URL}/mcp`
 
-OAuth mode also expects:
+The existing TYPO3 OAuth integration also expects the following endpoints.
 
 - `${TYPO3_BASE_URL}/oauth/authorize`
 - `${TYPO3_BASE_URL}/oauth/token`
 - `${TYPO3_BASE_URL}/oauth/userinfo`
 - `${TYPO3_BASE_URL}/oauth/revoke`
 
-If login fails, verify those routes first.
+Native MCP OAuth expects `${TYPO3_BASE_URL}/mcp_oauth/authorize` and `${TYPO3_BASE_URL}/mcp_oauth/token`. Check the server's OAuth metadata at `${TYPO3_BASE_URL}/.well-known/oauth-authorization-server` and verify that the registered redirect URI matches the app callback.
 
-If token-based mode is used, the MCP URL itself is the critical endpoint to verify.
-
-## TYPO3 Permission Checklist
+## TYPO3 permission checklist
 
 For end-to-end TYPO3 editing workflows, the backend user or token should be able to:
 
@@ -312,8 +406,10 @@ For end-to-end TYPO3 editing workflows, the backend user or token should be able
 - inspect table schemas through the MCP server
 - create or update records through `WriteTable`
 - work inside a writable TYPO3 workspace
+- browse and add files in the target file mount for `UploadFile`
+- read `sys_file` and create `sys_file_reference` where the content workflow uses file references
 
-If read operations succeed but write operations fail, verify TYPO3 permissions and workspace access before debugging the chat client.
+If reads succeed and writes fail, check the user's page mount, page rights, workspace membership, and table, field, and content-type permissions. For file errors, check the target folder and the file mount's browse and add permissions.
 
 ## Working Example
 
@@ -332,7 +428,6 @@ TYPO3_AGENT_MAX_STEPS=12
 MODEL_CATALOG_TIMEOUT_MS=4000
 DATABASE_PATH=data/app.db
 ```
-
 ### Working Example For Token-Based MCP Mode
 
 ```bash
@@ -347,9 +442,3 @@ TYPO3_AGENT_MAX_STEPS=12
 MODEL_CATALOG_TIMEOUT_MS=4000
 DATABASE_PATH=data/app.db
 ```
-
-## Notes About The TYPO3 OAuth Values
-
-The MCP extension documentation publicly confirms the MCP Server backend screen and the server URL. This application additionally requires an OAuth client ID and secret because it uses the TYPO3 OAuth authorization code flow directly from the browser.
-
-That means the values for `TYPO3_OAUTH_CLIENT_ID` and `TYPO3_OAUTH_CLIENT_SECRET` always come from the TYPO3-side OAuth client registration for this app, whether they are generated manually in TYPO3 or pre-generated by the scaffold command and then registered there.

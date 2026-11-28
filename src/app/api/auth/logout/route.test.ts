@@ -58,6 +58,18 @@ describe("OAuth logout", () => {
     expect(await db.select().from(sessions)).toEqual([]);
     expect(destroy).toHaveBeenCalledOnce();
   });
+
+  it("removes native sessions and cookies without sending tokens upstream", async () => {
+    vi.stubEnv("TYPO3_OAUTH_MODE", "mcp");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect((await logout()).headers.get("location")).toBe("http://localhost/api/auth/login");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await db.select().from(sessions)).toEqual([]);
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
   it("waits for pending rotation, denies new authentication, and revokes the latest pair", async () => {
     const entered = deferred<void>();
     const rotated = deferred<Response>();

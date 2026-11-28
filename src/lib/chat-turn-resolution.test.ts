@@ -59,7 +59,7 @@ describe("chat turn resolution", () => {
     expect(rows[0]?.content).toBe("Create a page");
   });
 
-  it.each(["WriteTable", "GetPageTree", "web_search"])("protects legacy failed writes and permits read recovery for %s", async (toolName) => {
+  it.each(["WriteTable", "UploadFile", "GetPageTree", "web_search"])("protects legacy failed writes and permits read recovery for %s", async (toolName) => {
     const mcp = await startFakeMcpServer();
     vi.stubEnv("TYPO3_MCP_URL", mcp.url);
     try {
@@ -68,8 +68,12 @@ describe("chat turn resolution", () => {
         { id: "legacy-assistant", conversation_id: "conversation-turns", role: "assistant", content: "", created_at: 2, tool_calls: JSON.stringify([{ type: `tool-${toolName}`, toolCallId: "legacy-error", state: "output-error", input: {}, errorText: "Connection lost" }]) },
       ]);
       const turn = resolveChatTurn({ conversationId: "conversation-turns", messageId: "legacy-assistant", trigger: "regenerate-message", uiMessages: [], userId: USER_ID });
-      if (toolName === "WriteTable") await expect(turn).rejects.toMatchObject({ status: 409 });
-      else await expect(turn).resolves.toMatchObject({ historyChange: { removeMessageIds: ["legacy-assistant"] } });
+      if (toolName === "WriteTable" || toolName === "UploadFile") {
+        await expect(turn).rejects.toMatchObject({
+          status: 409,
+          message: expect.stringContaining(toolName === "UploadFile" ? "TYPO3 file storage" : "TYPO3 workspace"),
+        });
+      } else await expect(turn).resolves.toMatchObject({ historyChange: { removeMessageIds: ["legacy-assistant"] } });
       expect(await orderedMessages()).toHaveLength(2);
     } finally {
       await mcp.close();

@@ -29,6 +29,7 @@ describe("conversation export route", () => {
       user_id: LOCAL_TOKEN_USER_ID,
       title: "Export Me",
     });
+    const preview = "https://www.example.test/team?ADMCMD_prev=private-preview";
     await db.insert(messages).values([
       {
         conversation_id: "export-me",
@@ -39,14 +40,17 @@ describe("conversation export route", () => {
       {
         conversation_id: "export-me",
         role: "assistant",
-        content: "",
+        content: `See the draft at ${preview}`,
         tool_calls: JSON.stringify([
           {
             type: "tool-ReadTable",
             toolCallId: "call-read",
             state: "output-available",
             input: { table: "tt_content" },
-            output: { rows: [{ uid: 1, header: "Hero" }] },
+            output: {
+              rows: [{ uid: 1, header: "Hero", preview_url: preview }],
+              _meta: { recordLinks: [{ kind: "preview", url: preview }] },
+            },
           },
         ]),
         created_at: 101,
@@ -66,6 +70,7 @@ describe("conversation export route", () => {
     expect(markdown).toContain("Read records");
     expect(markdown).toContain("tool-ReadTable");
     expect(markdown).toContain("Hero");
+    expect(markdown).not.toContain("private-preview");
   });
 
   it("does not export another user's conversation", async () => {

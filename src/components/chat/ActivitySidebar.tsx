@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ToolCallCard, type GenericToolPart } from "./ToolCallCard";
 import { getToolIntent } from "./tool-rendering";
+import type { Typo3UploadControls } from "./typo3-file-upload";
 
 function getOperation(part: GenericToolPart): "read" | "write" | "all" {
   return getToolIntent(part);
@@ -13,9 +14,11 @@ function getOperation(part: GenericToolPart): "read" | "write" | "all" {
 export function ActivitySidebar({
   messages,
   typo3BaseUrl,
+  uploadControls,
 }: {
   messages: UIMessage[];
   typo3BaseUrl: string;
+  uploadControls?: Typo3UploadControls;
 }) {
   const [filter, setFilter] = useState<"all" | "read" | "write">("all");
 
@@ -62,6 +65,7 @@ export function ActivitySidebar({
               compact
               defaultOpen={false}
               typo3BaseUrl={typo3BaseUrl}
+              uploadControls={uploadControls}
             />
           ))
         )}

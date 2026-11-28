@@ -1,4 +1,4 @@
-import { hasUnknownWriteOutcome } from "@/lib/mcp-outcome";
+import { getChangeTarget, getMcpOutputMeta, hasUnknownWriteOutcome } from "@/lib/mcp-outcome";
 import { isToolUIPart, type UIMessage } from "ai";
 
 export type ToolState =
@@ -44,6 +44,8 @@ export type PublicUrlAsset = {
   thumbnailUrl: string | null;
 };
 
+type RecordLink = { kind: "live" | "preview"; href: string };
+
 const WORKSPACE_MODULE_PATH = "/typo3/module/web/workspaces";
 const IMAGE_EXTENSION_PATTERN = /\.(avif|bmp|gif|ico|jpe?g|png|svg|webp)$/i;
 const MIME_FIELD_NAMES = [
@@ -73,16 +75,12 @@ export function getToolName(part: GenericToolPart): string {
 }
 
 export function getToolIntent(part: GenericToolPart): ToolIntent {
-  const meta =
-    part.output && typeof part.output === "object"
-      ? (part.output as { _meta?: { operation?: string } })._meta
-      : undefined;
-
+  const meta = getMcpOutputMeta(part.output);
   if (meta?.operation === "read" || meta?.operation === "write") {
     return meta.operation;
   }
 
-  return getToolName(part) === "WriteTable" ? "write" : "read";
+  return getChangeTarget(getToolName(part)) ? "write" : "read";
 }
 
 export function getOperationType(part: GenericToolPart): ToolOperation {
@@ -94,12 +92,7 @@ export function getOperationType(part: GenericToolPart): ToolOperation {
 }
 
 export function getBackendRecordUrl(part: GenericToolPart): string | null {
-  if (!part.output || typeof part.output !== "object") {
-    return null;
-  }
-
-  const meta = (part.output as { _meta?: { backendRecordUrl?: string | null } })._meta;
-  return meta?.backendRecordUrl || null;
+  return resolvePublicUrl(getMcpOutputMeta(part.output)?.backendRecordUrl);
 }
 
 export function buildWorkspaceModuleUrl(typo3BaseUrl: string): string | null {
@@ -111,7 +104,7 @@ export function buildWorkspaceModuleUrl(typo3BaseUrl: string): string | null {
   return new URL(WORKSPACE_MODULE_PATH, baseUrl).toString();
 }
 
-export function isSuccessfulWorkspaceWrite(part: GenericToolPart): boolean {
+function isSuccessfulWrite(part: GenericToolPart): boolean {
   if (getToolIntent(part) !== "write") {
     return false;
   }
@@ -124,15 +117,44 @@ export function isSuccessfulWorkspaceWrite(part: GenericToolPart): boolean {
     return false;
   }
 
+  const outcome = getMcpOutputMeta(part.output)?.outcome;
   if (
-    part.output &&
-    typeof part.output === "object" &&
-    (part.output as { isError?: unknown }).isError === true
+    outcome === "pending" || outcome === "unknown" || outcome === "blocked" || outcome === "rejected" ||
+    (isRecord(part.output) && part.output.isError === true)
   ) {
     return false;
   }
 
   return true;
+}
+
+export function getToolChangeTarget(part: GenericToolPart) {
+  const target = getMcpOutputMeta(part.output)?.changeTarget;
+  return target === "workspace" || target === "storage" ? target : getChangeTarget(getToolName(part));
+}
+
+export function isSuccessfulStorageWrite(part: GenericToolPart): boolean {
+  return getToolChangeTarget(part) === "storage" && isSuccessfulWrite(part);
+}
+
+export function isSuccessfulWorkspaceWrite(part: GenericToolPart): boolean {
+  return getToolChangeTarget(part) !== "storage" && isSuccessfulWrite(part);
+}
+
+export function getRecordLinks(output: unknown): RecordLink[] {
+  const rawLinks = getMcpOutputMeta(output)?.recordLinks;
+  if (!Array.isArray(rawLinks)) return [];
+
+  const links: RecordLink[] = [];
+  const seen = new Set<string>();
+  for (const link of rawLinks) {
+    if (!isRecord(link) || (link.kind !== "live" && link.kind !== "preview")) continue;
+    const href = resolvePublicUrl(link.url);
+    if (!href || seen.has(href)) continue;
+    seen.add(href);
+    links.push({ kind: link.kind, href });
+  }
+  return links;
 }
 
 export function deriveQueuedWorkspaceChanges(
@@ -166,12 +188,12 @@ export function deriveQueuedWorkspaceChanges(
 }
 
 export function stripToolOutputMeta(output: unknown): unknown {
-  if (!output || typeof output !== "object" || Array.isArray(output)) {
+  if (!isRecord(output)) {
     return output;
   }
 
   return Object.fromEntries(
-    Object.entries(output as Record<string, unknown>).filter(
+    Object.entries(output).filter(
       ([key]) => key !== "_meta",
     ),
   );
@@ -196,8 +218,8 @@ export function collectPublicUrlAssets(
       return;
     }
 
-    const rawPublicUrl = current.public_url;
-    if (typeof rawPublicUrl === "string" && rawPublicUrl.trim()) {
+    const rawPublicUrl = current.public_url ?? current.publicUrl;
+    if (typeof rawPublicUrl === "string") {
       const href = resolvePublicUrl(rawPublicUrl, typo3BaseUrl);
       if (href && !seenHrefs.has(href)) {
         seenHrefs.add(href);
@@ -219,7 +241,16 @@ export function collectPublicUrlAssets(
       if (key === "_meta") {
         continue;
       }
-      visit(child);
+      if (typeof child === "string" && ((key === "text" && current.type === "text") || key === "output")) {
+        try {
+          const parsed: unknown = JSON.parse(child);
+          visit(parsed);
+        } catch {
+          // MCP also returns plain-text results.
+        }
+      } else {
+        visit(child);
+      }
     }
   }
 
@@ -227,17 +258,17 @@ export function collectPublicUrlAssets(
   return assets;
 }
 
-function resolvePublicUrl(
-  rawUrl: string,
-  typo3BaseUrl: string,
+export function resolvePublicUrl(
+  rawUrl: unknown,
+  typo3BaseUrl = "",
 ): string | null {
+  if (typeof rawUrl !== "string" || !rawUrl.trim()) return null;
   const trimmedUrl = rawUrl.trim();
   const baseUrl = parseConfiguredBaseUrl(typo3BaseUrl);
 
   try {
-    return baseUrl
-      ? new URL(trimmedUrl, baseUrl).toString()
-      : new URL(trimmedUrl).toString();
+    const url = new URL(trimmedUrl, baseUrl ?? undefined);
+    return isWebUrl(url) ? url.href : null;
   } catch {
     return null;
   }
@@ -250,10 +281,15 @@ function parseConfiguredBaseUrl(typo3BaseUrl: string): URL | null {
   }
 
   try {
-    return new URL(trimmedBaseUrl);
+    const url = new URL(trimmedBaseUrl);
+    return isWebUrl(url) ? url : null;
   } catch {
     return null;
   }
+}
+
+function isWebUrl(url: URL): boolean {
+  return (url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password;
 }
 
 function isConfiguredTypo3Host(href: string, typo3BaseUrl: string): boolean {

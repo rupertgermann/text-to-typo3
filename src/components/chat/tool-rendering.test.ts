@@ -57,6 +57,12 @@ describe("tool rendering helpers", () => {
             _meta: { operation: "read" },
           },
         }),
+        toolPart({
+          type: "tool-UploadFile",
+          toolCallId: "call-storage",
+          state: "output-available",
+          output: { uid: 456, _meta: { operation: "write", changeTarget: "storage" } },
+        }),
       ]),
     ];
 
@@ -131,6 +137,19 @@ describe("tool rendering helpers", () => {
         thumbnailUrl: null,
       },
     ]);
+  });
+
+  it("links file tool results from the MCP text envelope using their camel-case public URL", () => {
+    const assets = collectPublicUrlAssets({
+      content: [
+        { type: "text", text: JSON.stringify({ publicUrl: "/fileadmin/landing.pdf", fileName: "landing.pdf" }) },
+        { type: "text", text: JSON.stringify({ publicUrl: "javascript:alert(1)" }) },
+      ],
+    }, TYPO3_BASE_URL);
+    expect(assets).toEqual([expect.objectContaining({
+      href: `${TYPO3_BASE_URL}/fileadmin/landing.pdf`,
+      displayName: "landing.pdf",
+    })]);
   });
 });
 

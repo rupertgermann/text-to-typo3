@@ -150,8 +150,8 @@ describe("chat route integration", () => {
     const saved = await persistedUiMessages("stop-flight");
     expect(saved.slice(0, before.length)).toEqual(before);
     expect(saved.at(-1)?.parts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ toolCallId: "sent", state: "output-available", output: expect.objectContaining(kind === "regenerate" ? { _meta: { operation: "write", outcome: "unknown" } } : { uid: 123 }) }),
-      expect.objectContaining({ toolCallId: "queued", state: "output-available", output: expect.objectContaining({ _meta: { operation: "write", outcome: "blocked" } }) }),
+      expect.objectContaining({ toolCallId: "sent", state: "output-available", output: expect.objectContaining(kind === "regenerate" ? { _meta: { operation: "write", outcome: "unknown", changeTarget: "workspace" } } : { uid: 123 }) }),
+      expect.objectContaining({ toolCallId: "queued", state: "output-available", output: expect.objectContaining({ _meta: { operation: "write", outcome: "blocked", changeTarget: "workspace" } }) }),
     ]));
     expect(fakeMcp.toolCalls).toHaveLength(1);
     expect(fakeModel.chatRequests).toHaveLength(1);
@@ -394,8 +394,8 @@ describe("chat route integration", () => {
     expect(fakeModel.chatRequests).toHaveLength(1);
     const saved = await persistedUiMessages("tls-write");
     expect(saved.at(-1)?.parts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ toolCallId: "tls-sent", state: "output-available", output: expect.objectContaining({ _meta: { operation: "write", outcome: "unknown" } }) }),
-      expect.objectContaining({ toolCallId: "tls-queued", state: "output-available", output: expect.objectContaining({ _meta: { operation: "write", outcome: "blocked" } }) }),
+      expect.objectContaining({ toolCallId: "tls-sent", state: "output-available", output: expect.objectContaining({ _meta: { operation: "write", outcome: "unknown", changeTarget: "workspace" } }) }),
+      expect.objectContaining({ toolCallId: "tls-queued", state: "output-available", output: expect.objectContaining({ _meta: { operation: "write", outcome: "blocked", changeTarget: "workspace" } }) }),
     ]));
     const next = await postChat({ conversationId: "tls-write", text: "Continue" });
     expect(next.status).toBe(200);
@@ -497,6 +497,52 @@ describe("chat route integration", () => {
     expect((await latestAssistantMessage("partial"))?.content).toBe("Partial answer");
   });
 
+  it.each(["WriteTable", "UploadFile"])("retires a saved hosted %s approval and accepts a fresh turn", async (name) => {
+    fakeMcp = await startFakeMcpServer(name === "WriteTable" ? {
+      tools: [{ name: "UploadFile", description: "Upload to storage.", inputSchema: { type: "object" } }],
+    } : undefined);
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [createTextResponse({ text: "Fresh reply" })] });
+    await seedTokenModeConversation({ conversationId: "legacy-hosted", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Hosted" });
+    await db.update(userSettings).set({ model_id: "gpt-5.4-nano" });
+    vi.stubEnv("OPENAI_API_KEY", "synthetic");
+    const realFetch = globalThis.fetch;
+    const hosted = vi.fn(() => { throw new Error("Unexpected hosted provider call"); });
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => (
+      String(input).startsWith("https://api.openai.com/") ? hosted() : realFetch(input, init)
+    ));
+    const pending = {
+      type: "dynamic-tool", toolName: `mcp.${name}`, state: "approval-requested",
+      toolCallId: "hosted-call", input: {}, approval: { id: "hosted-approval" }, providerExecuted: true,
+    } satisfies UIMessage["parts"][number];
+    await db.insert(messages).values([
+      { id: "hosted-user", conversation_id: "legacy-hosted", role: "user", content: "Previous request", created_at: 1 },
+      { id: "hosted-assistant", conversation_id: "legacy-hosted", role: "assistant", content: "", tool_calls: JSON.stringify([pending]), created_at: 2 },
+    ]);
+    const chat = new Chat({
+      transport: stoppableTransport("legacy-hosted"),
+      messages: await persistedUiMessages("legacy-hosted"),
+    });
+    await chat.addToolApprovalResponse({ id: "hosted-approval", approved: name === "WriteTable" });
+    await chat.sendMessage();
+    expect(chat.error).toBeUndefined();
+    expect(chat.lastMessage?.parts).toMatchObject([
+      { state: "output-denied", toolCallId: "hosted-call" },
+      { type: "text", text: expect.stringContaining("new message") },
+    ]);
+    expect(hosted).not.toHaveBeenCalled();
+    expect(fakeMcp.toolCalls).toHaveLength(0);
+    expect((await persistedUiMessages("legacy-hosted")).at(-1)?.parts).toMatchObject([
+      { state: "output-denied", approval: { approved: false } },
+      { type: "text", text: expect.stringContaining("new message") },
+    ]);
+
+    await db.update(userSettings).set({ model_id: "fake-typo3-model" });
+    const next = await postChat({ conversationId: "legacy-hosted", text: "Fresh request" });
+    expect(next.status).toBe(200);
+    expect(await next.text()).toContain("Fresh reply");
+    expect(JSON.stringify(fakeModel.chatRequests)).not.toContain("hosted-call");
+  });
+
   it.each(["reload approval", "mixed read approval", "denial", "uncertain", "missing output", "provider failure"])("persists built-in MCP %s through the SDK and export", async (mode) => {
     const includeRead = mode === "mixed read approval";
     const approved = mode !== "denial";
@@ -554,7 +600,7 @@ describe("chat route integration", () => {
       expect(completed.at(-1)?.parts.some((part) => isToolUIPart(part) && part.state === "output-available")).toBe(false);
       return;
     }
-    expect(completed.at(-1)?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "dynamic-tool", state: "output-available", output: expect.objectContaining(mode === "provider failure" ? { _meta: { operation: "write", outcome: "unknown" } } : { name: "WriteTable" }) })]));
+    expect(completed.at(-1)?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "dynamic-tool", state: "output-available", output: expect.objectContaining(mode === "provider failure" ? { _meta: { operation: "write", outcome: "unknown", changeTarget: "workspace" } } : { name: "WriteTable" }) })]));
     const exported = await exportConversation(new Request("http://localhost/api/conversations/dynamic/export") as never, { params: Promise.resolve({ id: "dynamic" }) });
     const markdown = await exported.text();
     expect(markdown).toContain("WriteTable");
@@ -678,6 +724,65 @@ describe("chat route integration", () => {
     await reloaded.sendMessage({ messageId: "image-user", parts: [newImage] });
     expect(reloaded.error).toBeUndefined();
     expect((await persistedUiMessages("edit-images"))[0].parts).toEqual([newImage]);
+  });
+
+  it("hands off an approved local file without exposing TYPO3's upload ticket", async () => {
+    const uploadToken = "test-private-upload-bearer";
+    const uploadUrl = "https://typo3.example.test/mcp_upload";
+    fakeMcp = await startFakeMcpServer({
+      tools: [{ name: "UploadFile", description: "Upload to storage.", inputSchema: { type: "object" }, annotations: { readOnlyHint: false } }],
+      toolResults: { UploadFile: { content: [{ type: "text", text: JSON.stringify({
+        uploadUrl,
+        uploadToken,
+        fileName: null,
+        targetFolder: "1:/user_upload/",
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+        instructions: `curl -H 'Authorization: Bearer ${uploadToken}' ${uploadUrl}`,
+      }) }] } },
+    });
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [
+      createToolCallResponse({ toolCallId: "local-upload", toolName: "UploadFile", argumentsJson: "{}" }),
+      createTextResponse({ text: "Choose a file in the tool result." }),
+      createTextResponse({ text: "Still waiting for the file." }),
+    ] });
+    await seedTokenModeConversation({
+      conversationId: "local-upload", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url, title: "Local upload",
+    });
+    const chat = new Chat({ transport: stoppableTransport("local-upload") });
+    await chat.sendMessage({ text: "Upload a local file" });
+    expect(chat.error).toBeUndefined();
+    expect(fakeMcp.toolCalls).toHaveLength(0);
+    const pending = chat.lastMessage?.parts.find(isToolUIPart);
+    if (pending?.state !== "approval-requested") throw new Error("Expected upload approval");
+
+    await chat.addToolApprovalResponse({ id: pending.approval.id, approved: true });
+    await chat.sendMessage();
+    expect(chat.error).toBeUndefined();
+    expect(fakeMcp.toolCalls).toEqual([{ name: "UploadFile", arguments: {} }]);
+    const handoff = chat.lastMessage?.parts.find(isToolUIPart);
+    expect(handoff).toMatchObject({
+      state: "output-available",
+      output: { _meta: { operation: "write", changeTarget: "storage", outcome: "pending",
+        upload: { id: expect.any(String), fileName: null, targetFolder: "1:/user_upload/" },
+      } },
+    });
+
+    await chat.sendMessage({ text: "Is the file in TYPO3 yet?" });
+    expect(chat.error).toBeUndefined();
+    const modelInputs = JSON.stringify(fakeModel.chatRequests.slice(1));
+    const stored = JSON.stringify(await persistedUiMessages("local-upload"));
+    const exported = await exportConversation(new Request("http://localhost/api/conversations/local-upload/export") as never,
+      { params: Promise.resolve({ id: "local-upload" }) });
+    const markdown = await exported.text();
+    for (const payload of [JSON.stringify(chat.messages), stored, modelInputs, markdown]) {
+      expect(payload).not.toContain(uploadToken);
+      expect(payload).not.toContain(uploadUrl);
+      expect(payload).not.toContain("curl");
+      expect(payload).toContain("No file has been uploaded yet");
+    }
+    expect(modelInputs).not.toContain("_meta");
+    expect(markdown).not.toContain("_meta");
+    expect(fakeModel.chatRequests[1]).toMatchObject({ tool_choice: "none" });
   });
 
   it("keeps SDK message IDs through send, edit, regenerate and approval without reloading", async () => {
@@ -1160,6 +1265,23 @@ describe("chat route integration", () => {
       "conversation-title",
       "TYPO3 Landing Page Work",
     );
+  });
+
+  it("keeps pasted and echoed preview URLs out of the title generation request", async () => {
+    fakeMcp = await startFakeMcpServer();
+    fakeModel = await startFakeOpenAICompatibleServer({ chatResponses: [
+      createTextResponse({ text: "Review https://site.test/page?ADMCMD_prev=assistant-secret" }),
+      createTextResponse({ text: "Draft review" }),
+    ] });
+    await seedTokenModeConversation({ conversationId: "preview-title", fakeMcpUrl: fakeMcp.url, fakeModelUrl: fakeModel.url });
+    const response = await postChat({ conversationId: "preview-title", text: "Review https://site.test/page?ADMCMD_prev=user-secret" });
+    expect(response.status).toBe(200);
+    await response.text();
+    await expectConversationTitle("preview-title", "Draft review");
+    const requests = JSON.stringify(fakeModel.chatRequests);
+    expect(requests).toContain("single-line conversation title");
+    expect(requests).not.toContain("assistant-secret");
+    expect(requests).not.toContain("user-secret");
   });
 
   it("keeps the first-words fallback when title generation fails", async () => {

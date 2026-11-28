@@ -7,6 +7,7 @@ import { users, sessions } from "@/lib/db/schema";
 import { createServer } from "node:http";
 import { deferred } from "@/test/deferred";
 import { getValidAccessToken } from "@/lib/auth";
+import { decrypt } from "@/lib/crypto";
 const saved = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/session", () => ({ getSession: async () => ({ save: saved }) }));
 vi.mock("next/headers", () => ({ cookies: async () => ({
@@ -58,6 +59,53 @@ it("authenticates the short-lived nonrefreshable token accepted by the callback"
   expect(session?.refresh_token).toBeNull();
   expect(session).toBeDefined();
   expect(await getValidAccessToken(session!.id)).toBe("short-lived-access");
+});
+
+it("isolates native grants and rotates their opaque tokens without changing local ownership", async () => {
+  vi.stubEnv("TYPO3_BASE_URL", "https://typo3.example.test/site/");
+  vi.stubEnv("NEXT_PUBLIC_APP_URL", "http://localhost:3014");
+  vi.stubEnv("TYPO3_OAUTH_MODE", "mcp");
+  vi.stubEnv("TYPO3_OAUTH_CLIENT_ID", "native-client");
+  vi.stubEnv("TYPO3_OAUTH_CLIENT_SECRET", "unused-legacy-secret");
+  const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+    const params = new URLSearchParams(String(init?.body));
+    if (params.get("grant_type") === "refresh_token") {
+      return Response.json({ access_token: "rotated", refresh_token: "next-refresh", expires_in: 180 });
+    }
+    const code = params.get("code");
+    return Response.json({
+      access_token: `opaque-${code}`,
+      refresh_token: `refresh-${code}`,
+      expires_in: 30,
+      sub: "42",
+    });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  for (const code of ["first", "second"]) {
+    const response = await GET(new NextRequest(`http://localhost:3014/api/auth/callback?code=${code}&state=state`));
+    expect(response.headers.get("location")).toBe("http://localhost:3014/");
+  }
+
+  const accounts = await db.select().from(users);
+  const grants = await db.select().from(sessions);
+  expect(accounts.map(account => account.typo3_uid)).toEqual([
+    expect.stringMatching(/^mcp-grant:/),
+    expect.stringMatching(/^mcp-grant:/),
+  ]);
+  expect(new Set(grants.map(grant => grant.user_id))).toEqual(new Set(accounts.map(account => account.id)));
+  const firstGrant = grants.find(grant => decrypt(grant.access_token) === "opaque-first");
+  if (!firstGrant) throw new Error("Missing session for first grant");
+  expect(await getValidAccessToken(firstGrant.id)).toBe("rotated");
+  expect(await db.query.sessions.findFirst({ where: (table, { eq }) => eq(table.id, firstGrant.id) }))
+    .toMatchObject({ user_id: firstGrant.user_id });
+
+  expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(Array(3).fill("https://typo3.example.test/site/mcp_oauth/token"));
+  expect(fetchMock.mock.calls.map(([, init]) => Object.fromEntries(new URLSearchParams(String(init?.body))))).toEqual([
+    { grant_type: "authorization_code", code: "first", code_verifier: "verifier", redirect_uri: "http://localhost:3014/api/auth/callback", client_id: "native-client" },
+    { grant_type: "authorization_code", code: "second", code_verifier: "verifier", redirect_uri: "http://localhost:3014/api/auth/callback", client_id: "native-client" },
+    { grant_type: "refresh_token", refresh_token: "refresh-first", client_id: "native-client" },
+  ]);
 });
 
 it.each([

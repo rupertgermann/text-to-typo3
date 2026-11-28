@@ -1,3 +1,6 @@
+import { getChangeTarget, getMcpOutputMeta } from "@/lib/mcp-outcome";
+import { isRecord } from "@/lib/mcp-result-content";
+
 export const DEFAULT_AGENT_LOOP_MAX_STEPS = 12;
 
 type EnvLike = {
@@ -20,6 +23,7 @@ type AgentLoopStepOptionsInput = {
   stepNumber: number;
   maxSteps: number;
   steps: AgentLoopStep[];
+  pendingUpload?: boolean;
 };
 
 const mutationWords = new Set([
@@ -37,6 +41,7 @@ const mutationWords = new Set([
   "set",
   "translate",
   "update",
+  "upload",
   "write",
   "aktualisieren",
   "aktualisiere",
@@ -47,6 +52,8 @@ const mutationWords = new Set([
   "erzeuge",
   "hinzufuegen",
   "hinzufügen",
+  "hochladen",
+  "hochzuladen",
   "lege",
   "loesche",
   "loeschen",
@@ -82,29 +89,17 @@ export function isTypo3MutationRequest(text: string): boolean {
 }
 
 export function isWriteToolName(toolName: string): boolean {
-  return toolName === "WriteTable";
+  return getChangeTarget(toolName) !== undefined;
 }
 
 export function hasSuccessfulWriteResult(steps: AgentLoopStep[]): boolean {
   return steps.some((step) =>
     (step.toolResults ?? []).some((toolResult) => {
-      const outputOperation =
-        toolResult.output && typeof toolResult.output === "object"
-          ? (toolResult.output as { _meta?: { operation?: string } })._meta?.operation
-          : undefined;
-      const isWrite =
-        outputOperation === "write" || isWriteToolName(toolResult.toolName);
+      const meta = getMcpOutputMeta(toolResult.output);
+      const isWrite = meta?.operation === "write" || isWriteToolName(toolResult.toolName);
 
-      if (!isWrite) {
-        return false;
-      }
-
-      if (!toolResult.output || typeof toolResult.output !== "object") {
-        return true;
-      }
-
-      const output = toolResult.output as { isError?: unknown };
-      return output.isError !== true;
+      return isWrite && meta?.outcome !== "pending" &&
+        (!isRecord(toolResult.output) || toolResult.output.isError !== true);
     }),
   );
 }
@@ -115,7 +110,12 @@ export function getAgentLoopStepOptions({
   stepNumber,
   maxSteps,
   steps,
-}: AgentLoopStepOptionsInput): { toolChoice: "required" } | undefined {
+  pendingUpload,
+}: AgentLoopStepOptionsInput): { toolChoice: "required" | "none" } | undefined {
+  if (pendingUpload || steps.some((step) =>
+    step.toolResults?.some(({ output }) => getMcpOutputMeta(output)?.outcome === "pending"))) {
+    return { toolChoice: "none" };
+  }
   if (
     !isChatCompletionsPath ||
     !isTypo3MutationRequest(userText) ||
