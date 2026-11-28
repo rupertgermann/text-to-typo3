@@ -121,12 +121,19 @@ export const PATCH = withAuth(async (request: NextRequest, auth) => {
           : expected.lmstudio_base_url && selectedModelId === expected.lmstudio_model_id
             ? "lmstudio"
             : "openai";
-        const modelContextWindow = selectedModelId
-          ? (selectedProvider === "openai" ? getOpenAIModelContextWindowHint(selectedModelId) : null) ??
-            (await listAvailableModelsForUser(auth.user.id)).models.find(
-              (model) => model.id === selectedModelId && model.provider === selectedProvider,
-            )?.contextWindow ?? expected.model_context_window
+        let modelContextWindow = selectedProvider === "openai" && selectedModelId
+          ? getOpenAIModelContextWindowHint(selectedModelId)
           : null;
+        if (selectedModelId && modelContextWindow === null) {
+          const catalog = await listAvailableModelsForUser(auth.user.id).catch(() => null);
+          if (!catalog) {
+            // The save committed before discovery. Return the latest persisted selection.
+            return Response.json(await getPublicUserSettings(auth.user.id));
+          }
+          modelContextWindow = catalog.models.find(
+            (model) => model.id === selectedModelId && model.provider === selectedProvider,
+          )?.contextWindow ?? expected.model_context_window;
+        }
         updated = await updateModelContextWindow(expected, modelContextWindow);
       }
     }

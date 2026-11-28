@@ -154,6 +154,22 @@ describe("settings route", () => {
     expect(await (await GET()).json()).toMatchObject({ modelId: "gpt-6.1-terra", hasOpenAIKey: false });
   });
 
+  it("returns the saved selection when discovery cannot decrypt an existing credential", async () => {
+    await patch({ modelId: "gpt-6.2-sol", openaiApiKey: "saved-key" });
+    vi.stubEnv("ENCRYPTION_KEY", "too-short");
+
+    const response = await patch({
+      modelId: "local-chat",
+      lmstudioModelId: "local-chat",
+      lmstudioBaseUrl: "http://provider.invalid/v1",
+    });
+    const saved = await (await GET()).json();
+
+    expect(saved).toMatchObject({ modelId: "local-chat", modelContextWindow: null, hasOpenAIKey: true });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(saved);
+  });
+
   it("persists settings while keeping OpenAI keys encrypted and private", async () => {
     const patchResponse = await PATCH(
       new Request("http://localhost/api/settings", {
