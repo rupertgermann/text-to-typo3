@@ -1,39 +1,34 @@
+import { isRecord } from "@/lib/mcp-result-content";
+
+export type ChangeTarget = "workspace" | "storage";
+
 export const UNKNOWN_WRITE_MESSAGE =
   "The TYPO3 write outcome is unknown. It may have completed. Check the TYPO3 workspace before making further changes; continue with a new message to reconcile the result.";
+const UNKNOWN_STORAGE_WRITE_MESSAGE = UNKNOWN_WRITE_MESSAGE.replace("workspace", "file storage");
+
+export function getChangeTarget(toolName: string): ChangeTarget | undefined {
+  const name = toolName.replace(/^mcp\./, "");
+  if (name === "WriteTable") return "workspace";
+  if (name === "UploadFile") return "storage";
+}
+
+export function getUnknownWriteMessage(target?: ChangeTarget): string {
+  return target === "storage" ? UNKNOWN_STORAGE_WRITE_MESSAGE : UNKNOWN_WRITE_MESSAGE;
+}
+
+export function getMcpOutputMeta(output: unknown): Record<string, unknown> | undefined {
+  return isRecord(output) && isRecord(output._meta) ? output._meta : undefined;
+}
 
 export function hasUnknownWriteOutcome(output: unknown): boolean {
-  if (!output || typeof output !== "object" || !("_meta" in output)) return false;
-  const meta = output._meta;
-  return typeof meta === "object" && meta !== null &&
-    "operation" in meta && meta.operation === "write" &&
-    "outcome" in meta && meta.outcome === "unknown";
+  const meta = getMcpOutputMeta(output);
+  return meta?.operation === "write" && meta.outcome === "unknown";
 }
 
-export function unknownWriteResult() {
+export function unknownWriteResult(changeTarget?: ChangeTarget) {
   return {
     isError: true,
-    content: [{ type: "text", text: UNKNOWN_WRITE_MESSAGE }],
-    _meta: { operation: "write", outcome: "unknown" },
+    content: [{ type: "text", text: getUnknownWriteMessage(changeTarget) }],
+    _meta: { operation: "write", outcome: "unknown", changeTarget },
   };
-}
-
-export function normalizeNativeMcpOutput(output: unknown, operation: "read" | "write"): unknown {
-  if (!output || typeof output !== "object") {
-    return operation === "write" ? unknownWriteResult() : output;
-  }
-  if (operation === "read") return { ...output, _meta: { operation } };
-  if (("error" in output && output.error) || !("output" in output) || typeof output.output !== "string") {
-    return { ...output, ...unknownWriteResult() };
-  }
-  let result: unknown;
-  try {
-    result = JSON.parse(output.output);
-  } catch {
-    return { ...output, ...unknownWriteResult() };
-  }
-  if (!result || typeof result !== "object" || Array.isArray(result)) {
-    return { ...output, ...unknownWriteResult() };
-  }
-  const rejected = "isError" in result && result.isError === true;
-  return { ...output, isError: rejected, _meta: { operation, outcome: rejected ? "rejected" : "confirmed" } };
 }

@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { randomBytes, createHash } from "node:crypto";
 import { cookies } from "next/headers";
-import { withApiRoute } from "@/lib/api-route";
+import { apiError, withApiRoute } from "@/lib/api-route";
 import { getEnv } from "@/lib/env";
+import { getOAuthEndpoint } from "@/lib/oauth";
 
 export const GET = withApiRoute(async () => {
   const env = getEnv();
@@ -12,6 +13,11 @@ export const GET = withApiRoute(async () => {
     (env.TYPO3_MCP_URL && env.TYPO3_MCP_URL.includes("token="))
   ) {
     return NextResponse.redirect(new URL("/", env.APP_URL));
+  }
+
+  const native = env.TYPO3_OAUTH_MODE === "mcp";
+  if (native && !env.TYPO3_OAUTH_CLIENT_ID) {
+    return apiError("oauth_not_configured", "Set TYPO3_OAUTH_CLIENT_ID for TYPO3 MCP OAuth", 503);
   }
 
   // Generate PKCE code verifier (43-128 chars, URL-safe)
@@ -43,14 +49,14 @@ export const GET = withApiRoute(async () => {
   });
 
   // Build TYPO3 OAuth authorize URL
-  const authorizeUrl = new URL(`${env.TYPO3_BASE_URL}/oauth/authorize`);
+  const authorizeUrl = new URL(getOAuthEndpoint(env, "authorize"));
   authorizeUrl.searchParams.set("client_id", env.TYPO3_OAUTH_CLIENT_ID);
   authorizeUrl.searchParams.set(
     "redirect_uri",
     `${env.APP_URL}/api/auth/callback`,
   );
   authorizeUrl.searchParams.set("response_type", "code");
-  authorizeUrl.searchParams.set("scope", "mcp");
+  authorizeUrl.searchParams.set("scope", native ? "mcp_access" : "mcp");
   authorizeUrl.searchParams.set("state", state);
   authorizeUrl.searchParams.set("code_challenge", codeChallenge);
   authorizeUrl.searchParams.set("code_challenge_method", "S256");

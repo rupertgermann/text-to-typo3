@@ -1,4 +1,6 @@
+import { deserializeMessageParts, messagePartsForDisclosure } from "@/lib/chat-message-parts";
 import type { Conversation, Message } from "@/lib/db/schema";
+import { getMcpRecordContent, redactTypo3PreviewUrls } from "@/lib/mcp-result-content";
 
 function formatTimestamp(epochSeconds: number | null | undefined): string {
   if (!epochSeconds) {
@@ -13,11 +15,13 @@ function formatToolCalls(toolCalls: string | null): string | null {
     return null;
   }
 
+  const parts = deserializeMessageParts(toolCalls);
+  if (parts) return JSON.stringify(messagePartsForDisclosure(parts), null, 2);
   try {
-    const parsed = JSON.parse(toolCalls);
-    return JSON.stringify(parsed, null, 2);
+    const parsed: unknown = JSON.parse(toolCalls);
+    return JSON.stringify(getMcpRecordContent(parsed).output, null, 2);
   } catch {
-    return toolCalls;
+    return redactTypo3PreviewUrls(toolCalls);
   }
 }
 
@@ -26,7 +30,7 @@ export function conversationToMarkdown(
   conversationMessages: Message[],
 ): string {
   const lines: string[] = [
-    `# ${conversation.title}`,
+    `# ${redactTypo3PreviewUrls(conversation.title)}`,
     "",
     `- Conversation ID: ${conversation.id}`,
     `- Created: ${formatTimestamp(conversation.created_at)}`,
@@ -44,7 +48,7 @@ export function conversationToMarkdown(
 
     lines.push(`## ${roleLabel}`);
     lines.push("");
-    lines.push(message.content || "");
+    lines.push(redactTypo3PreviewUrls(message.content || ""));
 
     const toolCalls = formatToolCalls(message.tool_calls ?? null);
     if (toolCalls) {
@@ -63,7 +67,7 @@ export function conversationToMarkdown(
 }
 
 export function conversationExportFilename(title: string): string {
-  const slug = title
+  const slug = redactTypo3PreviewUrls(title)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")

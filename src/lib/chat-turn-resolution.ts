@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { and, asc, eq } from "drizzle-orm";
 import { isToolUIPart, type UIMessage } from "ai";
 import { db } from "@/lib/db";
-import { hasUnknownWriteOutcome, UNKNOWN_WRITE_MESSAGE } from "@/lib/mcp-outcome";
+import { getChangeTarget, getUnknownWriteMessage, hasUnknownWriteOutcome } from "@/lib/mcp-outcome";
 import { listMcpToolNamesByOperation } from "@/lib/mcp";
 import { conversations, messages, type Conversation } from "@/lib/db/schema";
 import {
@@ -28,7 +28,7 @@ export class ChatTurnResolutionError extends Error {
 export interface ChatTurnResolution {
   continuationAssistantMessageId: string | null;
   nativeApprovalNames: string[];
-  claimApproval: (() => void) | null;
+  claimApproval: ((retirementReason?: string) => string[]) | null;
   conversation: Conversation;
   userText: string;
   historyChange: {
@@ -189,7 +189,7 @@ async function resolveApprovalContinuationTurn({
 }): Promise<{
   continuationAssistantMessageId: string;
   nativeApprovalNames: string[];
-  claimApproval: () => void;
+  claimApproval: (retirementReason?: string) => string[];
   userText: string;
 }> {
   const existingMessages = await orderedConversationMessages(conversationId);
@@ -285,10 +285,23 @@ async function resolveApprovalContinuationTurn({
       part.type === "dynamic-tool" && part.state === "approval-requested" && part.toolName.startsWith("mcp.")
         ? [part.toolName.slice(4)] : [],
     ),
-    claimApproval: () => {
+    claimApproval: (retirementReason) => {
+      const deniedIds: string[] = [];
+      const parts = retirementReason ? approvedParts.map((part) => {
+        if (!isToolUIPart(part) || part.state !== "approval-responded") return part;
+        deniedIds.push(part.toolCallId);
+        return {
+          ...part,
+          state: "output-denied" as const,
+          approval: { id: part.approval.id, approved: false as const, reason: retirementReason },
+        };
+      }).concat({ type: "text", text: retirementReason }) : approvedParts;
       const claimed = db
         .update(messages)
-        .set({ tool_calls: serializeMessageParts(approvedParts) })
+        .set({
+          tool_calls: serializeMessageParts(parts),
+          ...(retirementReason ? { content: extractMessageText(parts) } : {}),
+        })
         .where(
           and(
             eq(messages.id, targetMessageId),
@@ -300,6 +313,7 @@ async function resolveApprovalContinuationTurn({
       if (claimed.changes !== 1) {
         throw new ChatTurnResolutionError("Approval has already been handled", 400);
       }
+      return deniedIds;
     },
     userText: precedingUserMessage.content,
   };
@@ -401,10 +415,11 @@ async function assertReplaceableHistory(
       if (!isToolUIPart(part) || (part.state !== "output-available" && part.state !== "output-error" && part.state !== "approval-responded")) continue;
       if (part.state === "approval-responded" && !part.approval.approved) continue;
       const output = part.state === "output-available" ? part.output : undefined;
-      if (hasUnknownWriteOutcome(output)) {
-        throw new ChatTurnResolutionError(UNKNOWN_WRITE_MESSAGE, 409);
-      }
       const toolName = part.type === "dynamic-tool" ? part.toolName : part.type.slice(5);
+      const changeTarget = getChangeTarget(toolName);
+      if (hasUnknownWriteOutcome(output)) {
+        throw new ChatTurnResolutionError(getUnknownWriteMessage(changeTarget), 409);
+      }
       if (toolName === "web_search") continue;
       const nativeError = toolName.startsWith("mcp.") && typeof output === "object" && output !== null && "error" in output && Boolean(output.error);
       if (!nativeError && (
@@ -424,7 +439,7 @@ async function assertReplaceableHistory(
           ? meta.operation
           : undefined;
       let isWrite = operation === "write" ||
-        (operation !== "read" && toolName === "WriteTable");
+        (operation !== "read" && changeTarget !== undefined);
       if (part.type === "dynamic-tool" && toolName.startsWith("mcp.")) {
         try {
           readToolNames ??= (await listMcpToolNamesByOperation({ accessToken })).read;
@@ -446,7 +461,7 @@ async function assertReplaceableHistory(
       }
       if (isWrite) {
         throw new ChatTurnResolutionError(
-          part.state === "output-error" || part.state === "approval-responded" || nativeError ? UNKNOWN_WRITE_MESSAGE :
+          part.state === "output-error" || part.state === "approval-responded" || nativeError ? getUnknownWriteMessage(changeTarget) :
             "Completed TYPO3 changes cannot be retried or replaced. Continue with a new message so the saved tool results are retained.",
           409,
         );

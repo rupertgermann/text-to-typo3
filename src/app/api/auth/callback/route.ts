@@ -1,15 +1,21 @@
+import { randomUUID } from "node:crypto";
 import { type NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { db } from "@/lib/db";
 import { users, sessions } from "@/lib/db/schema";
 import { encrypt } from "@/lib/crypto";
 import { getSession } from "@/lib/session";
-import { withApiRoute } from "@/lib/api-route";
+import { apiError, withApiRoute } from "@/lib/api-route";
 import { getEnv } from "@/lib/env";
-import { oauthRequest, parseOAuthTokens } from "@/lib/oauth";
+import { oauthRequest, requestOAuthTokens } from "@/lib/oauth";
 
 export const GET = withApiRoute(async (request: NextRequest) => {
   const env = getEnv();
+  const native = env.TYPO3_OAUTH_MODE === "mcp";
+  if (native && !env.TYPO3_OAUTH_CLIENT_ID) {
+    return apiError("oauth_not_configured", "Set TYPO3_OAUTH_CLIENT_ID for TYPO3 MCP OAuth", 503);
+  }
+
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
   const state = searchParams.get("state");
@@ -41,22 +47,12 @@ export const GET = withApiRoute(async (request: NextRequest) => {
   cookieStore.delete("oauth_code_verifier");
 
   // Exchange authorization code for tokens
-  const tokens = await oauthRequest(
-    `${env.TYPO3_BASE_URL}/oauth/token`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: `${env.APP_URL}/api/auth/callback`,
-        client_id: env.TYPO3_OAUTH_CLIENT_ID,
-        client_secret: env.TYPO3_OAUTH_CLIENT_SECRET,
-        code_verifier: codeVerifier,
-      }),
-    },
-    async (response) => response.ok ? parseOAuthTokens(await response.json()) : null,
-  ).catch(() => null);
+  const tokens = await requestOAuthTokens(env, {
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: `${env.APP_URL}/api/auth/callback`,
+    code_verifier: codeVerifier,
+  }).catch(() => null);
 
   if (!tokens) {
     return NextResponse.redirect(
@@ -64,8 +60,7 @@ export const GET = withApiRoute(async (request: NextRequest) => {
     );
   }
 
-  // Fetch user info from TYPO3
-  const userInfo = await oauthRequest(
+  const userInfo = native ? null : await oauthRequest(
     `${env.TYPO3_BASE_URL}/oauth/userinfo`,
     {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
@@ -81,45 +76,37 @@ export const GET = withApiRoute(async (request: NextRequest) => {
     },
   ).catch(() => null);
 
-  if (!userInfo) {
+  if (!native && !userInfo) {
     return NextResponse.redirect(
       new URL("/?error=userinfo_failed", env.APP_URL),
     );
   }
 
-  // Upsert user in DB
-  const typo3Uid = String(userInfo.sub);
-  const [user] = await db
-    .insert(users)
-    .values({
+  const session = await getSession();
+  const dbSession = db.transaction((tx) => {
+    // Native grants supply no verified user identifier, so each grant owns a fresh local principal.
+    const typo3Uid = userInfo ? String(userInfo.sub) : `mcp-grant:${randomUUID()}`;
+    const insert = tx.insert(users).values({
       typo3_uid: typo3Uid,
-      display_name: userInfo.name || `User ${typo3Uid}`,
-    })
-    .onConflictDoUpdate({
-      target: users.typo3_uid,
-      set: { display_name: userInfo.name || users.display_name },
-    })
-    .returning();
+      display_name: userInfo ? userInfo.name || `User ${typo3Uid}` : "TYPO3 MCP user",
+    });
+    const user = userInfo
+      ? insert.onConflictDoUpdate({
+        target: users.typo3_uid,
+        set: { display_name: userInfo.name || users.display_name },
+      }).returning().get()
+      : insert.returning().get();
 
-  // Store encrypted tokens in sessions table
-  const expiresAt =
-    Math.floor(Date.now() / 1000) + (tokens.expires_in || 3600);
-
-  const [dbSession] = await db
-    .insert(sessions)
-    .values({
+    return tx.insert(sessions).values({
       user_id: user.id,
       access_token: encrypt(tokens.access_token),
-      refresh_token: tokens.refresh_token
-        ? encrypt(tokens.refresh_token)
-        : null,
-      expires_at: expiresAt,
-    })
-    .returning();
+      refresh_token: tokens.refresh_token ? encrypt(tokens.refresh_token) : null,
+      expires_at: Math.floor(Date.now() / 1000) + (tokens.expires_in || 3600),
+    }).returning().get();
+  });
 
   // Set Iron Session cookie
-  const session = await getSession();
-  session.userId = user.id;
+  session.userId = dbSession.user_id;
   session.sessionId = dbSession.id;
   await session.save();
 

@@ -8,6 +8,7 @@ import {
   serializeMessageParts,
 } from "@/lib/chat-message-parts";
 import type { ChatTurnResolution } from "@/lib/chat-turn-resolution";
+import { redactTypo3PreviewUrls } from "@/lib/mcp-result-content";
 
 export type TitleGenerator = (input: {
   assistantText: string;
@@ -16,7 +17,7 @@ export type TitleGenerator = (input: {
 }) => Promise<string | null>;
 
 export function getConversationTitle(text: string): string {
-  return text
+  return redactTypo3PreviewUrls(text)
     .trim()
     .split(/\s+/)
     .slice(0, 6)
@@ -24,7 +25,7 @@ export function getConversationTitle(text: string): string {
 }
 
 export function sanitizeGeneratedTitle(text: string): string | null {
-  const title = text
+  const title = redactTypo3PreviewUrls(text)
     .split(/\r?\n/)
     .at(0)
     ?.replace(/^["'“”‘’]+|["'“”‘’]+$/g, "")
@@ -45,8 +46,8 @@ export function createModelTitleGenerator(model: LanguageModel): TitleGenerator 
       system:
         "Write a concise, single-line conversation title. Return only the title.",
       prompt: [
-        `User: ${userText}`,
-        `Assistant: ${assistantText}`,
+        `User: ${redactTypo3PreviewUrls(userText)}`,
+        `Assistant: ${redactTypo3PreviewUrls(assistantText)}`,
         "Title:",
       ].join("\n"),
     });

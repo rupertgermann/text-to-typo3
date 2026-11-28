@@ -1,4 +1,27 @@
+import type { getEnv } from "@/lib/env";
+
 type OAuthTokens = { access_token: string; refresh_token?: string; expires_in?: number };
+type TokenGrant =
+  | { grant_type: "authorization_code"; code: string; redirect_uri: string; code_verifier: string }
+  | { grant_type: "refresh_token"; refresh_token: string };
+
+export function getOAuthEndpoint(env: ReturnType<typeof getEnv>, endpoint: "authorize" | "token") {
+  const prefix = env.TYPO3_OAUTH_MODE === "mcp" ? "mcp_oauth" : "oauth";
+  return `${env.TYPO3_BASE_URL.replace(/\/+$/, "")}/${prefix}/${endpoint}`;
+}
+
+export async function requestOAuthTokens(env: ReturnType<typeof getEnv>, grant: TokenGrant) {
+  if (env.TYPO3_OAUTH_MODE === "mcp" && !env.TYPO3_OAUTH_CLIENT_ID) return null;
+
+  const body = new URLSearchParams({ ...grant, client_id: env.TYPO3_OAUTH_CLIENT_ID });
+  if (env.TYPO3_OAUTH_MODE === "legacy") body.set("client_secret", env.TYPO3_OAUTH_CLIENT_SECRET);
+
+  return oauthRequest(
+    getOAuthEndpoint(env, "token"),
+    { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body },
+    async (response) => response.ok ? parseOAuthTokens(await response.json()) : null,
+  );
+}
 
 export function parseOAuthTokens(value: unknown): OAuthTokens {
   if (typeof value !== "object" || value === null || !("access_token" in value)) {

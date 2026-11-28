@@ -5,7 +5,7 @@ import { encrypt, decrypt } from "@/lib/crypto";
 import { getEnv } from "@/lib/env";
 import { getSession, type SessionData } from "@/lib/session";
 import type { IronSession } from "iron-session";
-import { oauthRequest, parseOAuthTokens } from "@/lib/oauth";
+import { oauthRequest, requestOAuthTokens } from "@/lib/oauth";
 
 const LOCAL_TOKEN_USER_ID = "local-token-user";
 // shortcut: refresh coordination is process-local; use shared locking before running multiple app processes.
@@ -88,21 +88,10 @@ async function resolveAccessToken(sessionId: string): Promise<string | null> {
   // Try to refresh
   if (!session.refresh_token) return null;
 
-  const env = getEnv();
-  const tokens = await oauthRequest(
-    `${env.TYPO3_BASE_URL}/oauth/token`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: decrypt(session.refresh_token),
-        client_id: env.TYPO3_OAUTH_CLIENT_ID,
-        client_secret: env.TYPO3_OAUTH_CLIENT_SECRET,
-      }),
-    },
-    async (response) => response.ok ? parseOAuthTokens(await response.json()) : null,
-  );
+  const tokens = await requestOAuthTokens(getEnv(), {
+    grant_type: "refresh_token",
+    refresh_token: decrypt(session.refresh_token),
+  });
 
   if (!tokens) return null;
 
@@ -208,7 +197,7 @@ async function revokeToken(token: string): Promise<void> {
   );
 }
 
-/** Blocks new refreshes, revokes the last persisted credentials, and removes the session. */
+/** Blocks new refreshes, revokes legacy credentials, and removes the session. */
 export async function revokeSessionTokens(sessionId: string): Promise<void> {
   if (isTokenAuthMode()) return;
   const pending = pendingLogouts.get(sessionId);
@@ -227,6 +216,8 @@ async function finishLogout(sessionId: string): Promise<void> {
   try {
     // A refresh already sent upstream may rotate both credentials before logout.
     await pendingAccessTokens.get(sessionId)?.catch(() => null);
+    if (getEnv().TYPO3_OAUTH_MODE === "mcp") return;
+
     const session = await db.query.sessions.findFirst({
       where: eq(sessions.id, sessionId),
     });

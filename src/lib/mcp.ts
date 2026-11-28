@@ -1,7 +1,12 @@
 import http from "node:http";
 import https from "node:https";
 import { jsonSchema, tool, type ToolSet } from "ai";
-import { hasUnknownWriteOutcome, unknownWriteResult } from "@/lib/mcp-outcome";
+import { getChangeTarget, getMcpOutputMeta, hasUnknownWriteOutcome, unknownWriteResult, type ChangeTarget } from "@/lib/mcp-outcome";
+import {
+  containsUploadTicket, getMcpRecordContent, getMcpResultData, isRecord, localUploadResult,
+  mcpResultForDisclosure, parseJsonObject, redactTypo3PreviewUrls,
+} from "@/lib/mcp-result-content";
+import { registerTypo3Upload } from "@/lib/typo3-upload";
 import { getEnv } from "@/lib/env";
 
 type JsonRpcSuccess<T> = {
@@ -35,10 +40,8 @@ type McpToolListResult = {
   tools: McpToolDefinition[];
 };
 
-type McpToolResult = {
-  content?: unknown;
-  [key: string]: unknown;
-};
+type UploadRegistration = Parameters<typeof registerTypo3Upload>[0];
+type UploadScope = Pick<UploadRegistration, "userId" | "conversationId">;
 
 type CachedToolSet = {
   accessToken: string;
@@ -74,6 +77,14 @@ export class McpHttpError extends Error {
   }
 }
 
+class ExpiredMcpSessionError extends McpHttpError {
+  constructor() {
+    super(404);
+  }
+}
+
+class McpDispatchStoppedError extends Error {}
+
 class McpRpcError extends Error {
   constructor(public readonly code: number, message: string) {
     super(message);
@@ -81,30 +92,37 @@ class McpRpcError extends Error {
 }
 
 // One exchange owns this queue, so cached tools never share recovery state.
-export function createMcpExecution(signal?: AbortSignal) {
+export function createMcpExecution(signal?: AbortSignal, uploadScope?: UploadScope) {
   let uncertain = false;
+  let pendingUpload = false;
   let queue = Promise.resolve();
   return {
     hasUnknownOutcome: () => uncertain,
+    hasPendingUpload: () => pendingUpload,
     wrap: (tools: ToolSet, readToolNames: string[]): ToolSet => Object.fromEntries(
       Object.entries(tools).map(([name, definition]) => {
         const execute = definition.execute;
         if (!execute || readToolNames.includes(name)) return [name, definition];
+        const changeTarget = getChangeTarget(name);
         return [name, {
           ...definition,
           execute: (input, options) => {
             const result = queue.then(async () => {
-              if (signal?.aborted) return stoppedWriteResult();
-              if (uncertain) return {
+              if (signal?.aborted) return stoppedWriteResult(changeTarget);
+              if (uncertain || pendingUpload) return {
                 isError: true,
-                content: [{ type: "text", text: "Not executed because an earlier TYPO3 write outcome is unknown." }],
-                _meta: { operation: "write", outcome: "blocked" },
+                content: [{ type: "text", text: uncertain
+                  ? "Not executed because an earlier TYPO3 write outcome is unknown."
+                  : "Waiting for the local file upload before making further TYPO3 changes." }],
+                _meta: { operation: "write", outcome: "blocked", changeTarget },
               };
-              const output = await execute(input, signal ? {
+              const output = await execute(input, {
                 ...options,
-                abortSignal: options.abortSignal ? AbortSignal.any([signal, options.abortSignal]) : signal,
-              } : options);
+                experimental_context: uploadScope,
+                abortSignal: signal && options.abortSignal ? AbortSignal.any([signal, options.abortSignal]) : signal ?? options.abortSignal,
+              });
               uncertain ||= hasUnknownWriteOutcome(output);
+              pendingUpload ||= getMcpOutputMeta(output)?.outcome === "pending";
               return output;
             });
             queue = result.then(() => undefined, () => undefined);
@@ -116,11 +134,11 @@ export function createMcpExecution(signal?: AbortSignal) {
   };
 }
 
-function stoppedWriteResult() {
+function stoppedWriteResult(changeTarget?: ChangeTarget) {
   return {
     isError: true,
     content: [{ type: "text", text: "Not executed because generation was stopped." }],
-    _meta: { operation: "write", outcome: "blocked" },
+    _meta: { operation: "write", outcome: "blocked", changeTarget },
   };
 }
 
@@ -128,6 +146,7 @@ const TOOL_CACHE_TTL_MS = 5 * 60 * 1000;
 const MCP_SUPPORTED_PROTOCOL_VERSION = "2025-06-18";
 const MCP_SESSION_CACHE_TTL_MS = 25 * 60 * 1000;
 const MCP_REQUEST_TIMEOUT_MS = 5_000;
+const MCP_URL_UPLOAD_TIMEOUT_MS = 305_000; // TYPO3 allows 300 seconds for the download itself.
 const toolCache = new Map<string, CachedToolSet>();
 const mcpSessionCache = new Map<string, CachedMcpSession>();
 
@@ -138,19 +157,13 @@ export function resetMcpCachesForTests(): void {
 
 export function getTypo3McpUrl(): string {
   const env = getEnv();
-  const baseUrl = env.TYPO3_MCP_URL || `${env.TYPO3_BASE_URL}/mcp`;
+  return env.TYPO3_MCP_URL || `${env.TYPO3_BASE_URL}/mcp`;
+}
 
-  if (!env.TYPO3_MCP_ACCESS_TOKEN) {
-    return baseUrl;
-  }
-
-  const url = new URL(baseUrl);
-
-  if (!url.searchParams.has("token")) {
-    url.searchParams.set("token", env.TYPO3_MCP_ACCESS_TOKEN);
-  }
-
-  return url.toString();
+export function getMcpAuthorization(accessToken: string): Record<string, string> {
+  const token = accessToken || (new URL(getTypo3McpUrl()).searchParams.has("token")
+    ? "" : getEnv().TYPO3_MCP_ACCESS_TOKEN);
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 function buildBackendRecordUrl(output: unknown): string | null {
@@ -195,10 +208,99 @@ function buildBackendRecordUrl(output: unknown): string | null {
   return url.toString();
 }
 
+function readUploadScope(scope: unknown): UploadScope | undefined {
+  if (isRecord(scope) && typeof scope.userId === "string" && typeof scope.conversationId === "string") {
+    return { userId: scope.userId, conversationId: scope.conversationId };
+  }
+}
+
+function asUploadUrl(input: unknown): string {
+  return isRecord(input) && typeof input.url === "string" ? input.url.trim() : "";
+}
+
+function uploadHasSource(input: unknown): boolean {
+  return Boolean(asUploadUrl(input)) || (isRecord(input) && typeof input.content === "string" && input.content !== "");
+}
+
+function normalizeMcpOutput({
+  name, operation, result, input, uploadScope, autoApproved,
+}: {
+  name: string;
+  operation: "read" | "write";
+  result: Record<string, unknown>;
+  input?: unknown;
+  uploadScope?: UploadScope;
+  autoApproved?: boolean;
+}) {
+  const changeTarget = getChangeTarget(name);
+  const approval = operation === "write" && autoApproved ? "auto-approved" : undefined;
+  const data = getMcpResultData(result);
+
+  if (name === "UploadFile") {
+    const hasSource = uploadHasSource(input);
+    if (containsUploadTicket(result) || (result.isError !== true && !hasSource)) {
+      const { uploadUrl, uploadToken, fileName, targetFolder, validUntil } = data;
+      const upload = result.isError !== true && !hasSource && uploadScope &&
+        typeof uploadUrl === "string" && typeof uploadToken === "string" &&
+        (typeof fileName === "string" || fileName === null) &&
+        typeof targetFolder === "string" && typeof validUntil === "string"
+        ? registerTypo3Upload({ ...uploadScope, uploadUrl, uploadToken, fileName, targetFolder, validUntil })
+        : null;
+      return {
+        ...localUploadResult(upload ? "pending" : "unavailable"),
+        _meta: { operation, changeTarget, approval, outcome: upload ? "pending" : "rejected", ...(upload ? { upload } : {}) },
+      };
+    }
+    if (result.isError !== true && (typeof data.uid !== "number" || !Number.isSafeInteger(data.uid) ||
+      data.uid <= 0 || typeof data.fileName !== "string" || !data.fileName)) return unknownWriteResult(changeTarget);
+  }
+
+  const { output, recordLinks } = getMcpRecordContent(result, name);
+  return {
+    ...(isRecord(output) ? output : {}),
+    _meta: {
+      operation,
+      changeTarget,
+      approval,
+      backendRecordUrl: operation === "write" && changeTarget !== "storage" ? buildBackendRecordUrl(data) : null,
+      ...(recordLinks.length ? { recordLinks } : {}),
+    },
+  };
+}
+
+export function normalizeNativeMcpOutput(
+  output: unknown,
+  name: string,
+  operation: "read" | "write",
+): unknown {
+  const changeTarget = getChangeTarget(name);
+  const result = isRecord(output) && !output.error && typeof output.output === "string"
+    ? parseJsonObject(output.output)
+    : undefined;
+  const safeOuter = mcpResultForDisclosure(output, name);
+  const source = isRecord(safeOuter) && !containsUploadTicket(output) ? safeOuter : {};
+  if (!result) {
+    if (operation === "read") return { ...source, _meta: { operation } };
+    return {
+      ...(typeof source.name === "string" ? { name: source.name } : {}),
+      ...unknownWriteResult(changeTarget),
+    };
+  }
+
+  const { _meta, ...safeResult } = normalizeMcpOutput({ name, operation, result });
+  const isError = "isError" in safeResult && safeResult.isError === true;
+  return {
+    ...source,
+    output: JSON.stringify(safeResult),
+    isError,
+    _meta: { ..._meta, outcome: "outcome" in _meta ? _meta.outcome : isError ? "rejected" : "confirmed" },
+  };
+}
+
 export function classifyMcpTool(
-  toolDefinition: Pick<McpToolDefinition, "annotations">,
+  toolDefinition: Pick<McpToolDefinition, "name" | "annotations">,
 ): "read" | "write" {
-  return toolDefinition.annotations?.readOnlyHint === true ? "read" : "write";
+  return !getChangeTarget(toolDefinition.name) && toolDefinition.annotations?.readOnlyHint === true ? "read" : "write";
 }
 
 function shouldAllowInsecureTls(url: URL): boolean {
@@ -310,11 +412,12 @@ async function postJson(
 
 async function withMcpRequestTimeout<T>(
   operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
 ): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => {
     controller.abort(createMcpTimeoutError());
-  }, MCP_REQUEST_TIMEOUT_MS);
+  }, timeoutMs);
 
   try {
     return await operation(controller.signal);
@@ -371,19 +474,23 @@ function setCachedMcpSession(
   });
 }
 
+type McpMethodRequest = {
+  accessToken: string;
+  method: string;
+  params?: Record<string, unknown>;
+  timeoutMs?: number;
+  protocolVersion?: string | null;
+  sessionHeaderId?: string | null;
+};
+
 async function callMcpMethod<T>({
   accessToken,
   method,
   params,
   protocolVersion,
   sessionHeaderId,
-}: {
-  accessToken: string;
-  method: string;
-  params?: Record<string, unknown>;
-  protocolVersion?: string | null;
-  sessionHeaderId?: string | null;
-}): Promise<McpMethodResponse<T>> {
+  timeoutMs = MCP_REQUEST_TIMEOUT_MS,
+}: McpMethodRequest): Promise<McpMethodResponse<T>> {
   const mcpUrl = getTypo3McpUrl();
   const response = await withMcpRequestTimeout((signal) =>
     postJson(
@@ -394,7 +501,7 @@ async function callMcpMethod<T>({
         ...(protocolVersion
           ? { "MCP-Protocol-Version": protocolVersion }
           : {}),
-        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        ...getMcpAuthorization(accessToken),
         ...(sessionHeaderId ? { "Mcp-Session-Id": sessionHeaderId } : {}),
       },
       JSON.stringify({
@@ -405,9 +512,17 @@ async function callMcpMethod<T>({
       }),
       signal,
     ),
+    timeoutMs,
   );
 
   if (response.status < 200 || response.status >= 300) {
+    if (sessionHeaderId && response.status === 404 &&
+      response.headers.get("content-type")?.split(";", 1)[0] === "application/json") {
+      const body = parseJsonObject(response.body);
+      if (body?.error === "Session not found or expired" && Object.keys(body).length === 1) {
+        throw new ExpiredMcpSessionError();
+      }
+    }
     throw new McpHttpError(response.status);
   }
 
@@ -423,14 +538,57 @@ async function callMcpMethod<T>({
   };
 }
 
+async function callMcpWithSession<T>(
+  request: Omit<McpMethodRequest, "protocolVersion" | "sessionHeaderId">,
+  session: InitializedMcpSession | null,
+  { cacheKey, signal }: { cacheKey?: string; signal?: AbortSignal } = {},
+): Promise<McpMethodResponse<T>> {
+  async function dispatch(active: InitializedMcpSession | null) {
+    if (signal?.aborted) throw new McpDispatchStoppedError();
+    try {
+      const response = await callMcpMethod<T>({
+        ...request,
+        protocolVersion: active?.protocolVersion,
+        sessionHeaderId: active?.sessionId,
+      });
+      const sessionId = response.sessionHeaderId ?? active?.sessionId;
+      if (cacheKey && sessionId) {
+        setCachedMcpSession(cacheKey, {
+          sessionId,
+          protocolVersion: active?.protocolVersion ?? MCP_SUPPORTED_PROTOCOL_VERSION,
+        });
+      }
+      return response;
+    } catch (error) {
+      if (error instanceof ExpiredMcpSessionError && cacheKey &&
+        getCachedMcpSession(cacheKey)?.sessionId === active?.sessionId) {
+        mcpSessionCache.delete(cacheKey);
+      }
+      throw error;
+    }
+  }
+
+  try {
+    return await dispatch(session);
+  } catch (error) {
+    if (!(error instanceof ExpiredMcpSessionError)) throw error;
+    if (signal?.aborted) throw new McpDispatchStoppedError();
+
+    // The transport returns this error before the tool handler is dispatched.
+    const cached = cacheKey ? getCachedMcpSession(cacheKey) : null;
+    const refreshed = cached ?? await initializeMcp(request.accessToken).catch(() => null);
+    if (signal?.aborted) throw new McpDispatchStoppedError();
+    if (!refreshed?.sessionId) throw error;
+    return dispatch(refreshed);
+  }
+}
+
 export async function testMcpConnection(accessToken: string): Promise<number> {
   const mcpSession = await initializeMcp(accessToken);
-  const listResponse = await callMcpMethod<McpToolListResult>({
+  const listResponse = await callMcpWithSession<McpToolListResult>({
     accessToken,
     method: "tools/list",
-    protocolVersion: mcpSession?.protocolVersion,
-    sessionHeaderId: mcpSession?.sessionId,
-  });
+  }, mcpSession);
 
   return listResponse.result.tools.length;
 }
@@ -509,26 +667,17 @@ export async function getMcpTools({
     }
   }
 
-  const listResponse = await callMcpMethod<McpToolListResult>({
+  const listResponse = await callMcpWithSession<McpToolListResult>({
     accessToken,
     method: "tools/list",
-    protocolVersion: mcpSession?.protocolVersion,
-    sessionHeaderId: mcpSession?.sessionId,
-  });
-  const activeMcpSessionId = listResponse.sessionHeaderId ?? mcpSession?.sessionId;
-  const activeProtocolVersion =
-    mcpSession?.protocolVersion ?? MCP_SUPPORTED_PROTOCOL_VERSION;
-
-  if (activeMcpSessionId) {
-    setCachedMcpSession(sessionId, {
-      protocolVersion: activeProtocolVersion,
-      sessionId: activeMcpSessionId,
-    });
-  }
+  }, mcpSession, { cacheKey: sessionId });
+  const activeMcpSessionId = getCachedMcpSession(sessionId)?.sessionId;
 
   const tools = Object.fromEntries(
     listResponse.result.tools.map((mcpTool) => {
+      const { name } = mcpTool;
       const operation = classifyMcpTool(mcpTool);
+      const changeTarget = getChangeTarget(name);
 
       return [
         mcpTool.name,
@@ -541,7 +690,8 @@ export async function getMcpTools({
               additionalProperties: true,
             },
           ),
-          execute: async (input, { abortSignal }) => {
+          toModelOutput: ({ output }) => ({ type: "json", value: mcpResultForDisclosure(output, name) }),
+          execute: async (input, { abortSignal, experimental_context: uploadScope }) => {
             let executeMcpSession = getCachedMcpSession(sessionId);
 
             if (!executeMcpSession && activeMcpSessionId) {
@@ -556,49 +706,49 @@ export async function getMcpTools({
               }
             }
 
-            if (operation === "write" && abortSignal?.aborted) return stoppedWriteResult();
+            if (operation === "write" && abortSignal?.aborted) return stoppedWriteResult(changeTarget);
 
-            let result: McpMethodResponse<McpToolResult>;
+            let result: McpMethodResponse<unknown>;
             try {
-              result = await callMcpMethod<McpToolResult>({
+              result = await callMcpWithSession<unknown>({
                 accessToken,
                 method: "tools/call",
+                timeoutMs: name === "UploadFile" && asUploadUrl(input) ? MCP_URL_UPLOAD_TIMEOUT_MS : undefined,
                 params: {
                   name: mcpTool.name,
                   arguments: input,
                 },
-                protocolVersion: executeMcpSession?.protocolVersion,
-                sessionHeaderId: executeMcpSession?.sessionId,
-              });
-              if (!result.result || typeof result.result !== "object" || Array.isArray(result.result)) {
+              }, executeMcpSession, { cacheKey: sessionId, signal: operation === "write" ? abortSignal : undefined });
+              if (!isRecord(result.result)) {
                 throw new Error("Invalid MCP tool result");
               }
             } catch (error) {
               if (operation === "read") throw error;
+              if (error instanceof McpDispatchStoppedError) return stoppedWriteResult(changeTarget);
+              if (error instanceof ExpiredMcpSessionError) return {
+                isError: true,
+                content: [{ type: "text", text: "TYPO3 rejected the expired session before running the tool. Try again in a new message." }],
+                _meta: { operation, outcome: "rejected", changeTarget },
+              };
               if (error instanceof McpRpcError && error.code === -32602) {
                 return {
                   isError: true,
-                  content: [{ type: "text", text: error.message }],
-                  _meta: { operation, outcome: "rejected" },
+                  content: [{ type: "text", text: name === "UploadFile" && containsUploadTicket(error.message)
+                    ? "TYPO3 rejected the file upload." : redactTypo3PreviewUrls(error.message) }],
+                  _meta: { operation, outcome: "rejected", changeTarget },
                 };
               }
-              return unknownWriteResult();
+              return unknownWriteResult(changeTarget);
             }
 
-            const backendRecordUrl =
-              operation === "write" ? buildBackendRecordUrl(result.result) : null;
-
-            return {
-              ...result.result,
-              _meta: {
-                operation,
-                backendRecordUrl,
-                approval:
-                  operation === "write" && !requireWriteApproval
-                    ? "auto-approved"
-                    : undefined,
-              },
-            };
+            return normalizeMcpOutput({
+              name,
+              operation,
+              result: result.result,
+              input,
+              autoApproved: !requireWriteApproval,
+              uploadScope: readUploadScope(uploadScope),
+            });
           },
         }),
       ];
@@ -618,12 +768,10 @@ export async function listMcpToolNamesByOperation({
   accessToken: string;
 }): Promise<Record<"read" | "write", string[]>> {
   const mcpSession = await initializeMcp(accessToken);
-  const listResponse = await callMcpMethod<McpToolListResult>({
+  const listResponse = await callMcpWithSession<McpToolListResult>({
     accessToken,
     method: "tools/list",
-    protocolVersion: mcpSession?.protocolVersion,
-    sessionHeaderId: mcpSession?.sessionId,
-  });
+  }, mcpSession);
 
   return listResponse.result.tools.reduce<Record<"read" | "write", string[]>>(
     (toolNames, mcpTool) => {

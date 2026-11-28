@@ -8,7 +8,7 @@ The project is released under the MIT license.
 
 ## What The App Does
 
-- Authenticates against TYPO3 with OAuth 2.0 Authorization Code + PKCE.
+- Supports native MCP OAuth, existing TYPO3 OAuth integrations, and local MCP bearer tokens.
 - Stores encrypted TYPO3 session tokens in SQLite and restores sessions across refreshes.
 - Streams AI responses token-by-token with the Vercel AI SDK.
 - Persists conversations, messages, tool calls, and per-user model settings in SQLite.
@@ -67,6 +67,7 @@ TYPO3_BASE_URL=https://your-typo3.example
 TYPO3_MCP_URL=
 TYPO3_MCP_ACCESS_TOKEN=
 TYPO3_LOCAL_USER_NAME=Local TYPO3 Token
+TYPO3_OAUTH_MODE=legacy
 TYPO3_OAUTH_CLIENT_ID=your-client-id
 TYPO3_OAUTH_CLIENT_SECRET=your-client-secret
 OPENAI_API_KEY=your-openai-api-key
@@ -82,7 +83,7 @@ DATABASE_PATH=data/app.db
 ### Notes
 
 - `TYPO3_BASE_URL` is always required.
-- `TYPO3_OAUTH_CLIENT_ID` and `TYPO3_OAUTH_CLIENT_SECRET` are required in OAuth mode.
+- Set `TYPO3_OAUTH_MODE=mcp` and a registered public `TYPO3_OAUTH_CLIENT_ID` for native MCP OAuth. Existing TYPO3 OAuth integrations use both the client ID and `TYPO3_OAUTH_CLIENT_SECRET`.
 - `TYPO3_MCP_URL` can point directly at the MCP endpoint, including the tokenized URL from the TYPO3 MCP Server backend screen.
 - `TYPO3_MCP_ACCESS_TOKEN` enables token-based local mode when the TYPO3 instance expects a bearer token instead of browser OAuth.
 - `TYPO3_LOCAL_USER_NAME` controls the synthetic local display name used in token-based mode.
@@ -112,12 +113,11 @@ cp .env.example .env.local
 
 ## TYPO3 Instance Setup
 
-The TYPO3 instance needs the MCP server extension and TYPO3 OAuth endpoints that match this app's auth flow.
+The TYPO3 instance needs the MCP server extension. Choose the sign-in method that matches your setup.
 
-Two TYPO3 connection modes are supported:
-
-- OAuth mode for full TYPO3 browser login
-- token-based local mode using the MCP token URL shown in the TYPO3 backend MCP Server screen
+- Native MCP OAuth through the extension's OAuth endpoints.
+- An existing TYPO3 OAuth integration with a user identity endpoint.
+- Local token mode using a bearer token or tokenized URL from the TYPO3 backend.
 
 ### Required Composer packages in TYPO3
 
@@ -141,18 +141,10 @@ composer require georgringer/news
 - `TYPO3_MCP_URL`: optional full MCP endpoint URL, including `?token=...` when using token mode
 - `TYPO3_MCP_ACCESS_TOKEN`: optional raw MCP token when the TYPO3 instance accepts bearer-token MCP requests
 - `TYPO3_OAUTH_CLIENT_ID`: the OAuth client ID registered in TYPO3 for this app
-- `TYPO3_OAUTH_CLIENT_SECRET`: the matching OAuth client secret from TYPO3
+- `TYPO3_OAUTH_CLIENT_SECRET`: the matching client secret for an existing TYPO3 OAuth integration
 - `NEXT_PUBLIC_APP_URL`: the externally reachable URL of this Next.js app, for example `http://localhost:3000`
 
-The app uses these TYPO3 endpoints:
-
-- `${TYPO3_BASE_URL}/oauth/authorize`
-- `${TYPO3_BASE_URL}/oauth/token`
-- `${TYPO3_BASE_URL}/oauth/userinfo`
-- `${TYPO3_BASE_URL}/oauth/revoke`
-- `${TYPO3_MCP_URL}` or `${TYPO3_BASE_URL}/mcp`
-
-The step-by-step process for getting those values is documented in [docs/typo3-setup.md](./docs/typo3-setup.md).
+Follow the setup guide for the local v14 demo, the OAuth endpoints, and client registration. [TYPO3 setup guide](./docs/typo3-setup.md)
 
 ## Running The App
 
@@ -213,8 +205,9 @@ Database commands load Next.js environment files, including `.env.local`, so `DA
 
 - Visiting the app without a valid session starts TYPO3 OAuth login in OAuth mode and opens the chat directly in token-based MCP mode.
 - The callback exchanges the authorization code, stores encrypted tokens in SQLite, and writes the Iron Session cookie.
-- Expired access tokens are refreshed transparently.
-- Logout revokes TYPO3 tokens when possible and clears the local session.
+- The app refreshes access tokens when the grant permits refresh.
+- Native MCP OAuth starts a separate local profile and conversation history each time you authorize. Sign out of the app to end the local session. Revoke the native grant from **MCP Server** in TYPO3.
+- For an existing TYPO3 OAuth integration, signing out also requests upstream token revocation.
 
 ### Conversations
 
@@ -233,7 +226,8 @@ Database commands load Next.js environment files, including `.env.local`, so `DA
 - Stopping generation prevents further TYPO3 writes and model steps. Already-dispatched writes finish recording their completed or unknown outcomes before the conversation becomes available again.
 - Image preparation disables conflicting composer actions until the submission is ready, and a failed image read preserves the draft.
 - Completed TYPO3 writes remain in history if a later model step fails. Retry, Edit, and Regenerate cannot replace turns containing completed writes; send a new message to continue.
-- If a write response is lost, chat saves an unknown outcome and stops further writes in that response. Check the TYPO3 workspace before sending a new write request. Retry, Edit, and Regenerate preserve the uncertain result.
+- If a write response is lost, chat saves an unknown outcome and stops further writes in that response. Check the relevant TYPO3 workspace or file storage before sending a new write request. Retry, Edit, and Regenerate preserve the uncertain result.
+- A local file request opens a pending picker in the tool card and Activity. Select and submit the file, then use its receipt to insert the TYPO3 file UID into a draft.
 - Conversation history restores after reload.
 - TYPO3 MCP sessions can span several tool steps inside one response, up to `TYPO3_AGENT_MAX_STEPS` model/tool round-trips per request.
 - Chat requests resolve the turn, provider, and persistence plan through dedicated modules before streaming.
@@ -248,9 +242,9 @@ Database commands load Next.js environment files, including `.env.local`, so `DA
 - Tool caches are keyed by Conversation Write Approval mode so auto-approve toggles use the correct tool definitions.
 - Read and write tool calls are rendered as collapsible cards in the chat thread.
 - The Activity sidebar shows the same tool traffic in chronological order with read/write filters.
-- Write results can expose a direct TYPO3 backend record link when the MCP response includes record metadata.
+- Tool results can show a TYPO3 backend record link, the live page, and a private workspace preview. Preview links appear in tool details. The app removes them from model input and Markdown exports.
 - Write operations pause for approval unless the Conversation has auto-approve writes enabled. Pending approvals show Approve/Deny controls in the banner and in the relevant tool card.
-- The upstream TYPO3 MCP server toolset used by the app includes `GetPageTree`, `GetPage`, `ListTables`, `ReadTable`, `Search`, `GetTableSchema`, `GetFlexFormSchema`, and `WriteTable`.
+- `WriteTable` stages changes for review in the TYPO3 workspace. `UploadFile` stores files immediately in the user's file mount. Only staged record changes count toward the workspace total. [TYPO3 tools and upload workflows](./docs/typo3-setup.md#typo3-mcp-tools)
 
 ### Model selection
 
@@ -265,7 +259,7 @@ Database commands load Next.js environment files, including `.env.local`, so `DA
 - Context-window information is shown in model cards and persisted for chat budgeting.
 - Saving an unchanged model/provider keeps its known context limit when catalog discovery is unavailable. Changing the selected model or provider clears that limit until a new one is known.
 - The default selected model falls back to `gpt-5.4-mini` when no user preference is stored.
-- New requests use the app's TYPO3 MCP bridge for every model, so uncertain writes can stop further automatic mutations. Saved approvals from the provider's built-in MCP integration can still be approved or denied; each additional hosted call requires approval.
+- New requests and approvals use the app's TYPO3 MCP bridge for every model. If a saved provider-hosted approval is retired after an MCP upgrade, send the request again in a new message. Older MCP servers without `UploadFile` still support continuing saved record approvals with an OpenAI model.
 - LM Studio and custom OpenAI-compatible models use the chat-completions path and the same server-side TYPO3 MCP bridge as the app-managed OpenAI path.
 - For TYPO3 mutation requests on OpenAI-compatible chat-completions models, the chat loop keeps tool calling active until a write succeeds or the configured step cap is reached.
 
@@ -307,9 +301,9 @@ Database commands load Next.js environment files, including `.env.local`, so `DA
 
 The app stores its local database in `data/app.db`.
 
-Run one Node.js process per SQLite database. Conversation generation and OAuth refresh coordination run in that process. Multiple workers require shared coordination before they can safely use the same database.
+Run one Node.js process per SQLite database. Conversation generation, OAuth refresh, and pending local upload grants use process-local coordination.
 
-OAuth requests have a 10-second deadline covering response headers and body reads. Logout clears the local session even if remote revocation fails. It revokes saved credentials without starting a refresh and includes rotated credentials from a refresh already in progress.
+OAuth requests have a 10-second deadline covering headers and body reads. The app clears the local session on logout. For an existing TYPO3 OAuth integration, it also asks TYPO3 to revoke the latest credentials.
 
 The current schema includes:
 

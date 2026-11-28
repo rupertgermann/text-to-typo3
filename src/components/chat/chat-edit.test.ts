@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { isValidElement, type ReactNode, type SetStateAction } from "react";
 import { Chat } from "@ai-sdk/react";
-import { DefaultChatTransport, createUIMessageStreamResponse, type ChatTransport, type ChatOnFinishCallback, type UIMessage, type UIMessageChunk } from "ai";
+import { DefaultChatTransport, createUIMessageStreamResponse, type ChatInit, type ChatTransport, type ChatOnFinishCallback, type UIMessage, type UIMessageChunk } from "ai";
 import { MessageBubble } from "./MessageBubble";
 import { ChatInterface } from "./ChatInterface";
+import type { Typo3UploadControls } from "./typo3-file-upload";
+import { getUnknownWriteMessage } from "@/lib/mcp-outcome";
 
-const hooks = vi.hoisted(() => ({ states: [] as unknown[], cursor: 0, chat: null as Chat<UIMessage> | null, onError: undefined as ((error: Error) => void) | undefined, onFinish: undefined as ChatOnFinishCallback<UIMessage> | undefined, initialError: undefined as Error | undefined }));
+const hooks = vi.hoisted(() => ({ states: [] as unknown[], cursor: 0, chat: null as Chat<UIMessage> | null, onError: undefined as ((error: Error) => void) | undefined, onFinish: undefined as ChatOnFinishCallback<UIMessage> | undefined, sendAutomaticallyWhen: undefined as ChatInit<UIMessage>["sendAutomaticallyWhen"], initialError: undefined as Error | undefined }));
 vi.mock("react", async (importOriginal) => ({
   ...await importOriginal<typeof import("react")>(),
   useState<T,>(initial: T | (() => T)) {
@@ -26,9 +28,10 @@ vi.mock("react", async (importOriginal) => ({
 }));
 vi.mock("@ai-sdk/react", async (importOriginal) => ({
   ...await importOriginal<typeof import("@ai-sdk/react")>(),
-  useChat: (options: { onError?: (error: Error) => void; onFinish?: ChatOnFinishCallback<UIMessage> }) => {
+  useChat: (options: ChatInit<UIMessage>) => {
     hooks.onError = options.onError;
     hooks.onFinish = options.onFinish;
+    hooks.sendAutomaticallyWhen = options.sendAutomaticallyWhen;
     const chat = hooks.chat;
     if (!chat) throw new Error("Chat fixture is missing");
     return { messages: chat.messages, status: chat.status, error: chat.error ?? hooks.initialError, sendMessage: chat.sendMessage, regenerate: chat.regenerate, stop: chat.stop, clearError: chat.clearError, addToolApprovalResponse: chat.addToolApprovalResponse, setMessages: (messages: UIMessage[]) => { chat.messages = messages; } };
@@ -43,6 +46,7 @@ type TestProps = {
   disabled?: boolean;
   allowEdit?: boolean;
   allowRegenerate?: boolean;
+  uploadControls?: Typo3UploadControls;
   onKeyDown?: (event: { key: string; shiftKey: boolean; preventDefault(): void }) => void;
   onEdit?: () => void;
   onRegenerate?: () => Promise<void>;
@@ -107,6 +111,73 @@ it("submits existing and newly attached images together when editing", async () 
   draw().find((node) => node.props.onDrop)?.props.onDrop?.({ preventDefault() {}, dataTransfer: { files: [new File(["new"], "new.png", { type: "image/png" })] } });
   await draw().find((node) => node.type === "form")?.props.onSubmit?.({ preventDefault() {} });
   expect(hooks.chat.messages[0].parts).toEqual([{ type: "text", text: "Inspect both" }, originalImage, { type: "file", mediaType: "image/png", filename: "new.png", url: "data:image/png;base64,bmV3" }]);
+});
+
+it("adds the approved file UID to the chat draft only when requested", () => {
+  const sendMessages = vi.fn();
+  hooks.chat = new Chat<UIMessage>({
+    messages: [{ id: "assistant", role: "assistant", parts: [{ type: "text", text: "Choose a file." }] }],
+    transport: { sendMessages, reconnectToStream: async () => null },
+  });
+  draw().find((node) => node.type === "textarea")?.props.onChange?.({ target: { value: "Add the cover to the page." } });
+  const bubble = draw().find((node) => node.props.message?.id === "assistant")!;
+  bubble.props.uploadControls?.onUseFile?.(37);
+  bubble.props.uploadControls?.onUseFile?.(37);
+  expect(draw().find((node) => node.type === "textarea")?.props.value).toBe(
+    "Add the cover to the page.\n\nUse TYPO3 file UID 37.",
+  );
+  expect(sendMessages).not.toHaveBeenCalled();
+});
+
+it("displays storage recovery guidance from a structured chat error", () => {
+  hooks.chat = new Chat<UIMessage>({ transport: new DefaultChatTransport() });
+  const guidance = getUnknownWriteMessage("storage");
+  hooks.initialError = new Error(JSON.stringify({ error: { message: guidance } }));
+  expect(draw().some((node) => node.type === "p" && node.props.children === guidance)).toBe(true);
+});
+
+it.each(["app", "native", "mixed"])("resumes %s tool approvals once all decisions are ready", async (kind) => {
+  const appTool: UIMessage["parts"][number] = {
+    type: "tool-WriteTable", toolCallId: "app-call", state: "approval-requested", input: {}, approval: { id: "app-approval" },
+  };
+  const nativeTool: UIMessage["parts"][number] = {
+    type: "dynamic-tool", toolName: "mcp.UploadFile", providerExecuted: true,
+    toolCallId: "native-call", state: "approval-requested", input: {}, approval: { id: "native-approval" },
+  };
+  const toolCalls = kind === "native" ? [nativeTool] : kind === "mixed" ? [appTool, nativeTool] : [appTool];
+  const sendMessages = vi.fn<ChatTransport<UIMessage>["sendMessages"]>(async () => {
+    if (sendMessages.mock.calls.length > 1) throw new Error("Approval replayed");
+    return new ReadableStream({
+      start(controller) {
+        for (const tool of toolCalls) {
+          controller.enqueue({ type: "tool-output-denied", toolCallId: tool.toolCallId });
+        }
+        controller.close();
+      },
+    });
+  });
+  const chat = new Chat<UIMessage>({
+    messages: [{ id: "approval", role: "assistant", parts: [{ type: "step-start" }, ...toolCalls] }],
+    transport: { sendMessages, reconnectToStream: async () => null },
+    sendAutomaticallyWhen: (options) => hooks.sendAutomaticallyWhen?.(options) ?? false,
+  });
+  hooks.chat = chat;
+
+  const approve = () => draw().find((node) => node.props.children === "Approve")!.props.onClick!();
+  approve();
+  if (kind === "mixed") {
+    await vi.waitFor(() => expect(chat.messages[0].parts[1]).toMatchObject({ state: "approval-responded" }));
+    expect(sendMessages).not.toHaveBeenCalled();
+    approve();
+  }
+
+  await vi.waitFor(() => {
+    expect(chat.messages[0].parts.slice(1)).toEqual(toolCalls.map((tool) => expect.objectContaining({
+      toolCallId: tool.toolCallId, state: "output-denied",
+    })));
+    expect(chat.status).toBe("ready");
+  });
+  expect(sendMessages).toHaveBeenCalledOnce();
 });
 
 it.each(["edit", "regenerate", "retry"])("restores visible tool evidence when the server refuses %s", async (action) => {

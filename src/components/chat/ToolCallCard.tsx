@@ -3,14 +3,19 @@
 import { useMemo, useState } from "react";
 import { Check, ChevronDown, ChevronRight, ExternalLink, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { hasUnknownWriteOutcome, UNKNOWN_WRITE_MESSAGE } from "@/lib/mcp-outcome";
+import { getMcpOutputMeta, getUnknownWriteMessage, hasUnknownWriteOutcome } from "@/lib/mcp-outcome";
 import { cn } from "@/lib/utils";
+import { FileUploadHandoff } from "./FileUploadHandoff";
+import { getTypo3Upload, type Typo3UploadControls } from "./typo3-file-upload";
 import {
   buildWorkspaceModuleUrl,
   collectPublicUrlAssets,
   getBackendRecordUrl,
   getOperationType,
+  getRecordLinks,
+  getToolChangeTarget,
   getToolName,
+  isSuccessfulStorageWrite,
   isSuccessfulWorkspaceWrite,
   stripToolOutputMeta,
   type GenericToolPart,
@@ -52,12 +57,7 @@ function getApprovalLabel(part: GenericToolPart): string {
     return "approved";
   }
 
-  const meta =
-    part.output && typeof part.output === "object"
-      ? (part.output as { _meta?: { approval?: string } })._meta
-      : undefined;
-
-  if (meta?.approval === "auto-approved") {
+  if (getMcpOutputMeta(part.output)?.approval === "auto-approved") {
     return "auto-approved";
   }
 
@@ -90,6 +90,7 @@ export function ToolCallCard({
   compact = false,
   isPendingApproval = false,
   typo3BaseUrl = "",
+  uploadControls,
   onApprovalResponse,
 }: {
   part: GenericToolPart;
@@ -97,6 +98,7 @@ export function ToolCallCard({
   compact?: boolean;
   isPendingApproval?: boolean;
   typo3BaseUrl?: string;
+  uploadControls?: Typo3UploadControls;
   onApprovalResponse?: (response: {
     approved: boolean;
     id: string;
@@ -118,6 +120,13 @@ export function ToolCallCard({
     () => isSuccessfulWorkspaceWrite(part),
     [part],
   );
+  const isStorageWrite = isSuccessfulStorageWrite(part);
+  const upload = part.state === "output-available" && getToolChangeTarget(part) === "storage"
+    ? getTypo3Upload(part.output)
+    : null;
+  const recordLinks = useMemo(() => getRecordLinks(part.output), [part.output]);
+  const liveLinkCount = recordLinks.filter((link) => link.kind === "live").length;
+  const previewLinkCount = recordLinks.length - liveLinkCount;
   const inputObject = useMemo(() => parseObjectInput(part.input), [part.input]);
   const targetTable =
     typeof inputObject?.table === "string" ? inputObject.table : null;
@@ -141,7 +150,7 @@ export function ToolCallCard({
 
   return (
     <div
-      id={`tool-call-${part.toolCallId}`}
+      id={compact ? undefined : `tool-call-${part.toolCallId}`}
       className={cn(
         "min-w-0 scroll-mt-8 overflow-hidden rounded-xl border transition-shadow",
         toneClasses,
@@ -151,6 +160,7 @@ export function ToolCallCard({
     >
       <button
         type="button"
+        aria-expanded={isOpen}
         onClick={() => setIsOpen((open) => !open)}
         className={cn(
           "flex w-full items-center justify-between gap-3 px-3 py-2 text-left",
@@ -181,22 +191,53 @@ export function ToolCallCard({
 
       {hasUnknownWriteOutcome(part.output) ? (
         <p role="alert" className="border-t border-current/10 px-3 py-2 text-sm">
-          {UNKNOWN_WRITE_MESSAGE}
+          {getUnknownWriteMessage(getToolChangeTarget(part))}
         </p>
       ) : null}
 
-      {isQueuedWorkspaceWrite && workspaceModuleUrl ? (
+      {isQueuedWorkspaceWrite ? (
         <div className="flex flex-wrap items-center gap-2 border-t border-current/10 bg-background/45 px-3 py-2 text-xs">
           <span className="font-medium">Queued in workspace - not live yet.</span>
-          <a
-            href={workspaceModuleUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 underline underline-offset-2 hover:no-underline"
-          >
-            Open workspace module
-            <ExternalLink className="h-3 w-3" />
-          </a>
+          {workspaceModuleUrl ? (
+            <a
+              href={workspaceModuleUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 underline underline-offset-2 hover:no-underline"
+            >
+              Open workspace module
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          ) : null}
+        </div>
+      ) : null}
+
+      {recordLinks.length > 0 ? (
+        <div className="flex flex-wrap gap-x-3 gap-y-2 border-t border-current/10 bg-background/45 px-3 py-2 text-xs">
+          {recordLinks.map(({ kind, href }) => (
+            <a
+              key={href}
+              href={href}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex min-w-0 items-center gap-1 break-all underline underline-offset-2 hover:no-underline"
+            >
+              {kind === "live" ? "Open live record" : "Open workspace preview"}
+              {(kind === "live" ? liveLinkCount : previewLinkCount) > 1 ? ` (${new URL(href).pathname})` : ""}
+              <ExternalLink aria-hidden="true" className="h-3 w-3 shrink-0" />
+            </a>
+          ))}
+        </div>
+      ) : null}
+
+      {upload && uploadControls ? (
+        <FileUploadHandoff key={upload.id} upload={upload} controls={uploadControls} />
+      ) : null}
+
+      {isStorageWrite ? (
+        <div className="space-y-2 border-t border-current/10 bg-background/45 px-3 py-2 text-xs">
+          <p className="font-medium">Applied in TYPO3 file storage.</p>
+          {publicUrlAssets.length > 0 ? <PublicUrlList assets={publicUrlAssets} /> : null}
         </div>
       ) : null}
 
@@ -244,7 +285,7 @@ export function ToolCallCard({
           {output !== undefined ? (
             <div className="min-w-0 space-y-1">
               <div className="font-medium opacity-80">Output</div>
-              {publicUrlAssets.length > 0 ? (
+              {!isStorageWrite && publicUrlAssets.length > 0 ? (
                 <PublicUrlList assets={publicUrlAssets} />
               ) : null}
               <JsonBlock value={output} />

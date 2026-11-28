@@ -6,6 +6,7 @@ import {
   DefaultChatTransport,
   lastAssistantMessageIsCompleteWithApprovalResponses,
   isFileUIPart,
+  isToolUIPart,
   type FileUIPart,
   type UIMessage,
 } from "ai";
@@ -49,7 +50,14 @@ import {
 } from "./chat-scroll";
 import { derivePendingApprovals } from "@/lib/pending-approvals";
 import { deriveQueuedWorkspaceChanges } from "./tool-rendering";
-import { UNKNOWN_WRITE_MESSAGE } from "@/lib/mcp-outcome";
+import {
+  putTypo3File,
+  saveTypo3UploadReceipt,
+  type Typo3Upload,
+  type Typo3UploadControls,
+  type UploadStatus,
+} from "./typo3-file-upload";
+import { getUnknownWriteMessage, UNKNOWN_WRITE_MESSAGE } from "@/lib/mcp-outcome";
 
 interface ChatInterfaceProps {
   initialAutoApproveWrites: boolean;
@@ -109,6 +117,23 @@ function createPendingAttachments(files: File[]): PendingAttachment[] {
   return files.map((file) => ({ file }));
 }
 
+function shouldContinueAfterApproval({ messages }: { messages: UIMessage[] }): boolean {
+  const last = messages.at(-1);
+  if (last?.role !== "assistant") return false;
+
+  const lastStep = last.parts.findLastIndex((part) => part.type === "step-start");
+  const tools = last.parts.slice(lastStep + 1).filter(isToolUIPart);
+  const latest = Array.from(new Map(tools.map((part) => [part.toolCallId, part])).values());
+  // The SDK skips provider-executed tools. Legacy TYPO3 decisions still need to reach the server.
+  const nativeApprovals = latest.filter((part) => part.type === "dynamic-tool"
+    && part.providerExecuted === true && part.toolName.startsWith("mcp.")
+    && (part.state === "approval-requested" || part.state === "approval-responded"));
+  if (nativeApprovals.length === 0) return lastAssistantMessageIsCompleteWithApprovalResponses({ messages });
+
+  return nativeApprovals.some((part) => part.state === "approval-responded")
+    && !latest.some((part) => part.state === "approval-requested");
+}
+
 export function ChatInterface({
   initialAutoApproveWrites,
   conversationId,
@@ -126,6 +151,8 @@ export function ChatInterface({
   );
   const [savingAutoApproveWrites, setSavingAutoApproveWrites] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
+  const [uploadStatuses, setUploadStatuses] = useState<ReadonlyMap<string, UploadStatus>>(() => new Map());
+  const activeUploads = useRef(new Set<string>());
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const transcriptViewportRef = useRef<HTMLDivElement>(null);
@@ -156,7 +183,7 @@ export function ChatInterface({
     transport: new DefaultChatTransport({
       body: { conversationId },
     }),
-    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
+    sendAutomaticallyWhen: shouldContinueAfterApproval,
     onError: (error) => {
       const draft = submittedDraftRef.current;
       if (draft && isTurnConflict(error)) {
@@ -201,6 +228,37 @@ export function ChatInterface({
     () => deriveQueuedWorkspaceChanges(messages, typo3BaseUrl),
     [messages, typo3BaseUrl],
   );
+
+  const uploadFile = useCallback(async (upload: Typo3Upload, file: File) => {
+    if (activeUploads.current.has(upload.id)) return;
+    activeUploads.current.add(upload.id);
+    setUploadStatuses((current) => new Map(current).set(upload.id, { kind: "uploading" }));
+    try {
+      const status = await putTypo3File({ conversationId, upload, file });
+      if (status.kind === "complete") saveTypo3UploadReceipt(conversationId, upload.id, status.receipt);
+      setUploadStatuses((current) => new Map(current).set(upload.id, status));
+    } finally {
+      activeUploads.current.delete(upload.id);
+    }
+  }, [conversationId]);
+
+  const useUploadedFile = useCallback((uid: number) => {
+    if (submissionPending.current || isLoading || editingMessageId) return;
+    const reference = `Use TYPO3 file UID ${uid}.`;
+    setInput((current) => {
+      if (current.split("\n").includes(reference)) return current;
+      return current.trim() ? `${current.trimEnd()}\n\n${reference}` : reference;
+    });
+    setComposerError(null);
+    queueMicrotask(() => textareaRef.current?.focus());
+  }, [editingMessageId, isLoading]);
+
+  const uploadControls = useMemo<Typo3UploadControls>(() => ({
+    conversationId,
+    statuses: uploadStatuses,
+    onUpload: (upload, file) => void uploadFile(upload, file),
+    onUseFile: isBusy || editingMessageId ? undefined : useUploadedFile,
+  }), [conversationId, editingMessageId, isBusy, uploadFile, uploadStatuses, useUploadedFile]);
 
   const handleTranscriptScroll = useCallback(() => {
     const viewport = transcriptViewportRef.current;
@@ -555,6 +613,7 @@ export function ChatInterface({
                   onToolApprovalResponse={isBusy ? undefined : handleToolApprovalResponse}
                   pendingApprovalToolCallIds={pendingApprovalToolCallIds}
                   typo3BaseUrl={typo3BaseUrl}
+                  uploadControls={uploadControls}
                 />
               ))
             )}
@@ -795,13 +854,15 @@ export function ChatInterface({
       </div>
 
       {showActivity ? (
-        <ActivitySidebar messages={messages} typo3BaseUrl={typo3BaseUrl} />
+        <ActivitySidebar messages={messages} typo3BaseUrl={typo3BaseUrl} uploadControls={uploadControls} />
       ) : null}
     </div>
   );
 }
 
 function getChatErrorDisplayMessage(error: Error): string {
+  const unknownStorageWrite = getUnknownWriteMessage("storage");
+  if (error.message.includes(unknownStorageWrite)) return unknownStorageWrite;
   if (error.message.includes(UNKNOWN_WRITE_MESSAGE)) return UNKNOWN_WRITE_MESSAGE;
   if (isTurnConflict(error)) {
     return error.message.includes('"completed_tool_results"')
